@@ -88,6 +88,20 @@ OMP 18.8.4 ignores project `.omp/config.yaml`, so that project target remains
 read-only and no `config.yml` is silently created; ordinary project
 `.omp/config.yml` is writable. Invalid YAML is never overwritten.
 
+**Safety & Approvals** lists native `tools.approval` dictionary members,
+including Bash, custom tools and MCP tools. Enter the exact tool name or native
+`policyKey` and choose **Prepare entry** to obtain its current baseline without
+writing a policy. Then select `allow`, `prompt` or `deny`, or use **Restore
+inheritance** to remove only that layer's entry. Dots, colons and other
+punctuation stay part of the literal name. An inherited entry is distinct from
+an explicit `prompt`; OMP resolves its tool tier, policy-key fallback and
+approval mode when the call executes.
+
+The preserved legacy `extension` entry is a literal dictionary member, not a
+grant for every extension tool. Tool, login and editor confirmations remain
+interactive; only your response answers a pending Web confirmation. Saved
+policy changes take effect in new sessions and do not stop an active session.
+
 
 ## Quick Start
 

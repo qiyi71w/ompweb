@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, fireEvent, render } from "@testing-library/react/pure.js";
+import { act, cleanup, fireEvent, render } from "@testing-library/react/pure.js";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true, jsx: { runtime: "automatic" } });
-const { NativeSettingsFields } = await jiti.import("./NativeSettingsFields.tsx");
+const { NativeSettingsFields, NativeToolApprovals } = await jiti.import("./NativeSettingsFields.tsx");
 const { NATIVE_SETTINGS_FIELDS } = await jiti.import("../lib/omp/settings-contract.ts");
 afterEach(cleanup);
 function controller(field, calls) {
@@ -53,4 +53,25 @@ test("all field labels and adapter status keys have three-language coverage", ()
   const locales = ["en", "zh-CN", "ja"].map((language) => JSON.parse(readFileSync(new URL(`../lib/i18n/locales/${language}.json`, import.meta.url))));
   const keys = [...Object.values(NATIVE_SETTINGS_FIELDS).map((descriptor) => `settingsConfig.${descriptor.label}`), ...Object.keys(locales[0]).filter((key) => key.startsWith("nativeSettings."))];
   for (const locale of locales) for (const key of keys) assert.equal(typeof locale[key], "string", key);
+});
+
+test("dynamic approval controls preserve literal names and distinguish inherited from explicit prompt", async () => {
+  const calls = [];
+  const inherited = field("tools.approval.mcp__ops.deploy:v1", { exists: false }, "prompt", { policyKey: "mcp__ops.deploy:v1", supported: true });
+  const explicit = field("tools.approval.custom.probe", { exists: true, value: "prompt" }, "prompt", { policyKey: "custom.probe", supported: true });
+  const state = controller(inherited, calls);
+  state.view.capability = { available: true };
+  state.view.fields[explicit.key] = explicit;
+  state.discoverApproval = async (name) => { calls.push(["discover", name]); return true; };
+  const screen = render(React.createElement(NativeToolApprovals, { controller: state }));
+  const inheritedSelect = screen.getByRole("combobox", { name: "mcp__ops.deploy:v1" });
+  assert.equal(inheritedSelect.value, "");
+  assert.equal(screen.getByRole("combobox", { name: "custom.probe" }).value, "prompt");
+  fireEvent.change(inheritedSelect, { target: { value: "deny" } });
+  assert.deepEqual(calls[0], ["set", inherited.key, "deny"]);
+  fireEvent.click(screen.getByRole("button", { name: /custom.probe/ }));
+  assert.deepEqual(calls[1], ["unset", explicit.key]);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "xd://my.device:v2" } });
+  await act(async () => { fireEvent.submit(screen.getByRole("textbox").closest("form")); });
+  assert.deepEqual(calls[2], ["discover", "xd://my.device:v2"]);
 });

@@ -142,6 +142,25 @@ is retained. OMP 18.8.4 ignores project `.omp/config.yaml`; that target is
 explicitly read-only, with saved/native disagreement shown and no shadow
 `config.yml` created. Ordinary project `.omp/config.yml` supports set/unset.
 
+Approval fields carry a literal `policyKey`. The suffix of
+`tools.approval.<name>` is one dictionary member, addressed as
+`["tools", "approval", name]`, never split on punctuation. Reads discover the
+union of native and selected-layer members; repeated `approvalKey` GET
+parameters request baselines for prospective members. The controller's
+`discoverApproval(name)` adds a server-issued field baseline while retaining
+the displayed baselines of existing entries. Set/unset uses the same operation,
+HMAC and conflict protocol as finite fields. Ordinary unregistered keys remain
+outside the editable contract.
+
+Each approval update changes only its selected native dictionary entry.
+Top-level dotted configuration remains untouched; OMP 18.8.4 does not use it
+as a native approval dictionary. Unknown policy strings and complex members
+remain preserved and read-only. An absent entry is not an explicit `prompt`;
+the engine owns tool tiers, policy-key fallback and execution decisions.
+The Web wrapper retains pending extension UI requests for replay and forwards
+user responses. It does not derive authorization from titles or interpret
+the legacy `extension` member as a whole-class permission.
+
 ### Reconnect and foreground catch-up
 
 Completed conversation history is identified by persisted session entry IDs.

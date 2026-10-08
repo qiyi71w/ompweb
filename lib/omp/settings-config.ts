@@ -9,7 +9,7 @@ import { isRecord } from "../type-guards";
 import { isCompactionMethodOrder } from "../compaction-methods";
 import { assertSettingsTarget, settingsPathIn, type OmpConfigurationContext } from "./configuration-context";
 import { wrapWindowsScript } from "./omp-cli";
-import { NATIVE_SETTINGS_FIELDS, type NativeSettingsView, type NativeSettingView, type SavedSetting, type SettingValue, type SettingsScope, type SettingsWriteRequest } from "./settings-contract";
+import { APPROVAL_KEY_PREFIX, getNativeSettingDescriptor, NATIVE_SETTINGS_FIELDS, type NativeSettingsView, type NativeSettingView, type SavedSetting, type SettingValue, type SettingsScope, type SettingsWriteRequest } from "./settings-contract";
 
 export { resolveConfigurationContext } from "./configuration-context";
 export type { OmpConfigurationContext } from "./configuration-context";
@@ -34,17 +34,17 @@ export function readAnthropicSlowMode(): boolean {
   } catch { return false; }
 }
 
-export function readPersistedExtensionApproval(): unknown {
-  return readDocument(getSettingsPath()).getIn(["tools", "approval", "extension"]);
-}
-
 function targetPath(context: OmpConfigurationContext, scope: SettingsScope): string {
   return settingsPathIn(scope === "global" ? context.view.agentDir : join(context.view.cwd, ".omp"));
 }
 
+function settingPath(key: string): string[] {
+  return key.startsWith(APPROVAL_KEY_PREFIX) ? ["tools", "approval", key.slice(APPROVAL_KEY_PREFIX.length)] : key.split(".");
+}
+
 function ownPath(data: unknown, key: string): { exists: boolean; value?: unknown } {
   let current = data;
-  for (const part of key.split(".")) {
+  for (const part of settingPath(key)) {
     if (!isRecord(current) || !Object.hasOwn(current, part)) return { exists: false };
     current = current[part];
   }
@@ -53,9 +53,15 @@ function ownPath(data: unknown, key: string): { exists: boolean; value?: unknown
 
 function locations(data: unknown, key: string) {
   const nested = ownPath(data, key);
-  const dotted = isRecord(data) && Object.hasOwn(data, key) && key.includes(".") ? { exists: true, value: data[key] } : { exists: false };
+  // Native dictionary members are literal. Top-level dotted configuration is
+  // preserved, not silently migrated into a working native permission grant.
+  const approval = key.startsWith(APPROVAL_KEY_PREFIX);
+  const dotted = !approval && isRecord(data) && Object.hasOwn(data, key) && key.includes(".") ? { exists: true, value: data[key] } : { exists: false };
+  const tools = ownPath(data, "tools");
+  const dictionary = ownPath(data, "tools.approval");
+  const obstruction = approval ? [tools, dictionary].filter((part) => part.exists && !isRecord(part.value)) : [];
   const legacy = key === "compaction.methodOrder" ? ["compaction.strategy", "compaction.remoteEnabled"].map((alias) => ({ nested: ownPath(data, alias), dotted: isRecord(data) && Object.hasOwn(data, alias) ? { exists: true, value: data[alias] } : { exists: false } })) : [];
-  return { nested, dotted, legacy };
+  return { nested, dotted, legacy, obstruction };
 }
 
 function token(context: OmpConfigurationContext, scope: SettingsScope, key: string, data: unknown): string {
@@ -64,7 +70,7 @@ function token(context: OmpConfigurationContext, scope: SettingsScope, key: stri
 }
 
 function fitsShape(key: string, value: unknown, allowUnknownEnum = false): boolean {
-  const descriptor = NATIVE_SETTINGS_FIELDS[key];
+  const descriptor = getNativeSettingDescriptor(key);
   if (!descriptor) return false;
   switch (descriptor.type) {
     case "boolean": return typeof value === "boolean";
@@ -96,7 +102,8 @@ async function nativeEntries(context: OmpConfigurationContext): Promise<Record<s
 }
 
 /** A fresh native process is intentional: no utility/session cache or fabricated defaults. */
-export async function readNativeSettings(context: OmpConfigurationContext, scope: SettingsScope = "global"): Promise<NativeSettingsView> {
+export async function readNativeSettings(context: OmpConfigurationContext, scope: SettingsScope = "global", approvalKeys: string[] = []): Promise<NativeSettingsView> {
+  for (const name of approvalKeys) if (!getNativeSettingDescriptor(`${APPROVAL_KEY_PREFIX}${name}`)) throw new Error("Invalid approval policy key");
   const path = targetPath(context, scope);
   let data: unknown = {};
   let capability: NativeSettingsView["capability"] = { available: false, reason: context.view.binary ? "query-failed" : "binary-unavailable" };
@@ -116,17 +123,26 @@ export async function readNativeSettings(context: OmpConfigurationContext, scope
   }
   const unsupportedTarget = scope === "project" && basename(path) === "config.yaml" && /(?:^|\/)18\.8\.4$/.test(context.view.version ?? "");
   const fields: Record<string, NativeSettingView> = {};
-  for (const [key, descriptor] of Object.entries(NATIVE_SETTINGS_FIELDS)) {
+  const keys = new Set(Object.keys(NATIVE_SETTINGS_FIELDS));
+  const savedPolicies = ownPath(data, "tools.approval").value;
+  const nativePolicies = entries["tools.approval"]?.value;
+  for (const policies of [savedPolicies, nativePolicies]) if (isRecord(policies)) {
+    for (const name of Object.keys(policies)) if (getNativeSettingDescriptor(`${APPROVAL_KEY_PREFIX}${name}`)) keys.add(`${APPROVAL_KEY_PREFIX}${name}`);
+  }
+  for (const name of approvalKeys) keys.add(`${APPROVAL_KEY_PREFIX}${name}`);
+  for (const key of keys) {
+    const descriptor = getNativeSettingDescriptor(key)!;
     const saved = savedSetting(context, scope, key, data);
     const registration = entries[descriptor.parent ?? key];
     const supported = !!registration && registration.type === (descriptor.parent ? "record" : descriptor.type);
-    const rawValue = descriptor.parent ? ownPath(registration?.value, key.slice(descriptor.parent.length + 1)) : { exists: !!registration && Object.hasOwn(registration, "value"), value: registration?.value };
+    const policyKey = descriptor.parent === "tools.approval" ? key.slice(APPROVAL_KEY_PREFIX.length) : undefined;
+    const rawValue = policyKey !== undefined ? { exists: isRecord(registration?.value) && Object.hasOwn(registration.value, policyKey), value: isRecord(registration?.value) && Object.hasOwn(registration.value, policyKey) ? registration.value[policyKey] : undefined } : { exists: !!registration && Object.hasOwn(registration, "value"), value: registration?.value };
     const native: SettingValue = { known: supported && rawValue.exists && !registration?.redacted, ...(supported && rawValue.exists ? fitsShape(key, rawValue.value, true) ? { value: rawValue.value } : { redacted: true } : {}) };
     if (native.redacted) native.known = false;
     const unknownEnum = descriptor.type === "enum" && ((saved.exists && typeof saved.value === "string" && !descriptor.values?.includes(saved.value)) || (typeof native.value === "string" && !descriptor.values?.includes(native.value)));
-    const complex = saved.redacted || native.redacted;
+    const complex = saved.redacted || native.redacted || locations(data, key).obstruction.length > 0 || (policyKey !== undefined && supported && (registration.redacted || !isRecord(registration.value)));
     const reason = !capability.available ? "query-failed" : unsupportedTarget ? "project-yaml-unsupported" : !registration ? "unregistered" : !supported ? "type-mismatch" : descriptor.readOnly ? "constraint-only" : complex ? "complex-value" : unknownEnum ? "unknown-enum" : undefined;
-    fields[key] = { key, supported, editable: reason === undefined, canUnset: supported && !descriptor.readOnly && !unsupportedTarget && capability.available && (saved.exists || saved.legacyOverride === true) && !complex, ...(reason ? { reason } : {}), saved, native, effective: context.unknownEffectiveKeys.has("*") || context.unknownEffectiveKeys.has(key) ? { known: false } : native, application: descriptor.application ?? "new-session", type: descriptor.type };
+    fields[key] = { key, ...(policyKey !== undefined ? { policyKey } : {}), supported, editable: reason === undefined, canUnset: supported && !descriptor.readOnly && !unsupportedTarget && capability.available && (saved.exists || saved.legacyOverride === true) && !complex, ...(reason ? { reason } : {}), saved, native, effective: context.unknownEffectiveKeys.has("*") || context.unknownEffectiveKeys.has(key) || (policyKey !== undefined && context.unknownEffectiveKeys.has("tools.approval")) ? { known: false } : native, application: descriptor.application ?? "new-session", type: descriptor.type };
   }
   return { context: context.view, scope, path, capability, fields };
 }
@@ -139,7 +155,7 @@ export function validateSettingsWriteRequest(request: SettingsWriteRequest): voi
   if (!isRecord(request) || Object.keys(request).some((key) => !["contextId", "scope", "operations"].includes(key)) || typeof request.contextId !== "string" || !["global", "project"].includes(request.scope) || !Array.isArray(request.operations)) throw new Error("Expected contextId, scope and explicit settings operations");
   const seen = new Set<string>();
   for (const operation of request.operations) {
-    if (!isRecord(operation) || Object.keys(operation).some((key) => !["key", "op", "value", "baseline"].includes(key)) || typeof operation.key !== "string" || !Object.hasOwn(NATIVE_SETTINGS_FIELDS, operation.key) || seen.has(operation.key)) throw new Error("Unsupported or duplicate settings field");
+    if (!isRecord(operation) || Object.keys(operation).some((key) => !["key", "op", "value", "baseline"].includes(key)) || typeof operation.key !== "string" || !getNativeSettingDescriptor(operation.key) || seen.has(operation.key)) throw new Error("Unsupported or duplicate settings field");
     seen.add(operation.key);
     if (!["set", "unset"].includes(operation.op) || !isRecord(operation.baseline) || typeof operation.baseline.exists !== "boolean" || typeof operation.baseline.token !== "string") throw new Error("Settings operation requires an existence/value baseline");
     if (operation.op === "set" && !fitsShape(operation.key, operation.value)) throw new Error(`Invalid value for ${operation.key}`);
@@ -167,9 +183,10 @@ function sameToken(expected: string, actual: string): boolean {
 export async function writeNativeSettings(context: OmpConfigurationContext, request: SettingsWriteRequest): Promise<NativeSettingsView> {
   validateSettingsWriteRequest(request);
   const scope = request.scope;
+  const approvalKeys = request.operations.filter(({ key }) => key.startsWith(APPROVAL_KEY_PREFIX)).map(({ key }) => key.slice(APPROVAL_KEY_PREFIX.length));
   const lockKey = scope === "global" ? context.view.agentDir : join(context.view.cwd, ".omp");
   return serialized(lockKey, async () => {
-    const view = await readNativeSettings(context, scope);
+    const view = await readNativeSettings(context, scope, approvalKeys);
     if (request.contextId !== context.view.id) throw new SettingsConflictError(view, request.operations.map(({ key }) => key));
     if (!view.capability.available) throw new Error("Native configuration is read-only");
     const conflicts = request.operations.filter(({ key, baseline }) => {
@@ -188,13 +205,13 @@ export async function writeNativeSettings(context: OmpConfigurationContext, requ
     // Recheck after the native query, which can itself perform legacy migrations.
     const data = doc.toJS({ maxAliasCount: 100 }) ?? {};
     const changed = request.operations.filter(({ key, baseline }) => !sameToken(baseline.token, token(context, scope, key, data))).map(({ key }) => key);
-    if (changed.length) throw new SettingsConflictError(await readNativeSettings(context, scope), changed);
+    if (changed.length) throw new SettingsConflictError(await readNativeSettings(context, scope, approvalKeys), changed);
     for (const { key, op, value } of request.operations) {
-      if (key.includes(".") && isMap(doc.contents)) doc.delete(key);
+      if (!key.startsWith(APPROVAL_KEY_PREFIX) && key.includes(".") && isMap(doc.contents)) doc.delete(key);
       if (op === "unset") {
-        doc.deleteIn(key.split("."));
+        doc.deleteIn(settingPath(key));
         if (key === "compaction.methodOrder") for (const alias of ["compaction.strategy", "compaction.remoteEnabled"]) { doc.delete(alias); doc.deleteIn(alias.split(".")); }
-      } else doc.setIn(key.split("."), value);
+      } else doc.setIn(settingPath(key), value);
     }
     mkdirSync(dirname(path), { recursive: true });
     const temp = `${path}.tmp-${randomUUID()}`;
@@ -202,6 +219,6 @@ export async function writeNativeSettings(context: OmpConfigurationContext, requ
       writeFileSync(temp, doc.toString(), { encoding: "utf8", mode: existsSync(path) ? statSync(path).mode & 0o777 : 0o600, flag: "wx" });
       renameSync(temp, path);
     } finally { rmSync(temp, { force: true }); }
-    return { ...await readNativeSettings(context, scope), persistence: { saved: true, appliedToRunningSessions: false } };
+    return { ...await readNativeSettings(context, scope, approvalKeys), persistence: { saved: true, appliedToRunningSessions: false } };
   });
 }

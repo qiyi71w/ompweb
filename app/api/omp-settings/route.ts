@@ -24,7 +24,7 @@ export async function GET(request: Request) {
     const scope = scopeFrom(params.get("scope"));
     if (scope === "project" && !params.get("cwd")) throw new Error("Project scope requires a workspace");
     const context = await resolveConfigurationContext({ cwd: params.get("cwd"), sessionId: params.get("sessionId") });
-    return NextResponse.json(await readNativeSettings(context, scope));
+    return NextResponse.json(await readNativeSettings(context, scope, params.getAll("approvalKey")));
   } catch (error) { return errorResponse(error); }
 }
 

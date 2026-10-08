@@ -3,7 +3,7 @@
 import { useState, type CSSProperties } from "react";
 import { ArrowDown, ArrowUp, RefreshCw, RotateCcw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import { NATIVE_SETTINGS_FIELDS, type NativeSettingView } from "@/lib/omp/settings-contract";
+import { getNativeSettingDescriptor, type NativeSettingView } from "@/lib/omp/settings-contract";
 import type { NativeSettingsController } from "@/hooks/useNativeSettings";
 import { COMPACTION_METHODS, isCompactionMethodOrder } from "@/lib/compaction-methods";
 
@@ -39,6 +39,7 @@ export function NativeSettingState({ controller, field }: { controller: NativeSe
     <span>{t("nativeSettings.savedValue")}: <code>{!field.saved.exists ? t(field.saved.legacyOverride ? "nativeSettings.legacyOverride" : "nativeSettings.inherited") : field.saved.redacted ? t("nativeSettings.complex") : valueText(field.saved.value)}</code></span>
     <span>{t("nativeSettings.effectiveValue")}: <code>{field.effective.known ? valueText(field.effective.value) : t("nativeSettings.unknown")}</code></span>
     {!field.effective.known && field.native.known && <span>{t("nativeSettings.nativeQueryValue")}: <code>{valueText(field.native.value)}</code></span>}
+    {field.policyKey !== undefined && field.supported && !field.native.known && !field.native.redacted && <span>{t("nativeSettings.approval.inheritedPolicy")}</span>}
     <span>{t(`nativeSettings.application.${field.application}`)}</span>
     {field.reason && <span>{t(`nativeSettings.reason.${field.reason}`)}</span>}
     {field.canUnset && <button type="button" disabled={controller.loading || controller.saving || !!controller.conflicts.length} onClick={() => void controller.unset(field.key)} className="settings-back ui-focus-ring" style={{ alignSelf: "flex-start", fontSize: "var(--text-xs)" }} aria-label={`${t("nativeSettings.unset")} ${field.key}`}><RotateCcw size={12} />{t("nativeSettings.unset")}</button>}
@@ -47,12 +48,12 @@ export function NativeSettingState({ controller, field }: { controller: NativeSe
 
 function FieldEditor({ controller, field }: { controller: NativeSettingsController; field: NativeSettingView }) {
   const { t } = useI18n();
-  const descriptor = NATIVE_SETTINGS_FIELDS[field.key];
-  const value = field.saved.exists && !field.saved.redacted ? field.saved.value : field.effective.known ? field.effective.value : undefined;
+  const descriptor = getNativeSettingDescriptor(field.key)!;
+  const value = field.saved.exists && !field.saved.redacted ? field.saved.value : field.policyKey !== undefined ? undefined : field.effective.known ? field.effective.value : undefined;
   const [draft, setDraft] = useState(valueText(value));
   const [invalid, setInvalid] = useState(false);
   const disabled = !field.editable || controller.loading || controller.saving || !!controller.conflicts.length;
-  const label = t(`settingsConfig.${descriptor.label}`);
+  const label = field.policyKey ?? t(`settingsConfig.${descriptor.label}`);
   const persist = (next: unknown) => { void controller.set(field.key, next); };
   let editor;
   if (field.key === "compaction.methodOrder") {
@@ -79,7 +80,7 @@ function FieldEditor({ controller, field }: { controller: NativeSettingsControll
     const choices = descriptor.type === "boolean" ? ["true", "false"] : descriptor.values ?? [];
     const current = value === undefined ? "" : String(value);
     editor = <select aria-label={label} value={current} disabled={disabled} style={controlStyle} onChange={(event) => persist(descriptor.type === "boolean" ? event.target.value === "true" : event.target.value)}>
-      {(!choices.includes(current) || !current) && <option value={current}>{current || t("nativeSettings.unknown")}</option>}
+      {(!choices.includes(current) || !current) && <option value={current}>{current || t(field.policyKey !== undefined ? "nativeSettings.inherited" : "nativeSettings.unknown")}</option>}
       {choices.map((choice) => <option key={choice} value={choice}>{descriptor.type === "boolean" ? t(`nativeSettings.${choice}`) : choice}</option>)}
     </select>;
   } else {
@@ -109,4 +110,27 @@ export function NativeSettingsFields({ controller, keys }: { controller: NativeS
     const field = controller.view!.fields[key];
     return field ? <FieldEditor key={`${controller.scope}:${key}:${field.saved.token}:${JSON.stringify(field.native)}`} controller={controller} field={field} /> : null;
   })}</>;
+}
+
+export function NativeToolApprovals({ controller }: { controller: NativeSettingsController }) {
+  const { t } = useI18n();
+  const [name, setName] = useState("");
+  const disabled = !controller.view?.capability.available || controller.loading || controller.saving || !!controller.conflicts.length;
+  const keys = Object.values(controller.view?.fields ?? {}).filter((field) => field.policyKey !== undefined).map((field) => field.key);
+  return <>
+    <NativeSettingsFields controller={controller} keys={["tools.approvalMode"]} />
+    <div className="settings-card" data-search-id="tool-approval-policies" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 8, marginBottom: 10 }}>
+      <div className="settings-card-title">{t("settingsConfig.approvalPolicy")}</div>
+      <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("nativeSettings.approval.description")}</p>
+      <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{t("nativeSettings.approval.legacyExtension")}</p>
+      <form onSubmit={(event) => {
+        event.preventDefault();
+        void controller.discoverApproval(name).then((prepared) => { if (prepared) setName(""); });
+      }} style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        <input aria-label={t("nativeSettings.approval.name")} value={name} disabled={disabled} onChange={(event) => setName(event.target.value)} style={{ ...controlStyle, flex: "1 1 220px" }} />
+        <button type="submit" className="settings-back ui-focus-ring" disabled={disabled || !name.length}>{t("nativeSettings.approval.prepare")}</button>
+      </form>
+    </div>
+    <NativeSettingsFields controller={controller} keys={keys} />
+  </>;
 }

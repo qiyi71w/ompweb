@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { NativeSettingsView, SettingsOperation, SettingsScope } from "@/lib/omp/settings-contract";
+import { APPROVAL_KEY_PREFIX, getNativeSettingDescriptor, type NativeSettingsView, type SettingsOperation, type SettingsScope } from "@/lib/omp/settings-contract";
 
 export const NATIVE_SETTINGS_CHANGED_EVENT = "omp-native-settings-changed";
 
@@ -14,6 +14,7 @@ export interface NativeSettingsController {
   error: string | null;
   conflicts: string[];
   refresh: () => Promise<void>;
+  discoverApproval: (name: string) => Promise<boolean>;
   write: (changes: Array<{ key: string; op: "set" | "unset"; value?: unknown }>) => Promise<boolean>;
   set: (key: string, value: unknown) => Promise<boolean>;
   unset: (key: string) => Promise<boolean>;
@@ -76,9 +77,40 @@ export function useNativeSettings(cwd?: string | null, sessionId?: string | null
     return () => window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, invalidate);
   }, [refresh, conflicts.length]);
 
+  const discoverApproval = useCallback(async (name: string) => {
+    const key = `${APPROVAL_KEY_PREFIX}${name}`;
+    if (!view || loading || busy.current || conflicts.length || !getNativeSettingDescriptor(key)) return false;
+    if (Object.hasOwn(view.fields, key)) return true;
+    const requestGeneration = generation.current;
+    busy.current = true;
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`${url}&approvalKey=${encodeURIComponent(name)}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("read-failed");
+      const discovered = await response.json() as NativeSettingsView;
+      if (generation.current !== requestGeneration) return false;
+      if (discovered.context.id !== view.context.id || discovered.scope !== scope || !Object.hasOwn(discovered.fields, key)) throw new Error("read-failed");
+      // Keep displayed baselines for existing entries; discovery is not a hidden
+      // refresh that could erase a pending same-field conflict.
+      setView((current) => current ? { ...current, fields: { ...current.fields, [key]: discovered.fields[key] } } : current);
+      return true;
+    } catch {
+      if (generation.current === requestGeneration) setError("read-failed");
+      return false;
+    } finally {
+      busy.current = false;
+      setSaving(false);
+      const invalidated = pendingInvalidation.current;
+      pendingInvalidation.current = false;
+      if (invalidated && generation.current === requestGeneration) void refresh();
+    }
+  }, [view, loading, conflicts, url, scope, refresh]);
+
   const write = useCallback(async (changes: Array<{ key: string; op: "set" | "unset"; value?: unknown }>) => {
     if (!view || loading || busy.current || conflicts.length) return false;
     const requestGeneration = generation.current;
+    if (changes.some(({ key }) => !Object.hasOwn(view.fields, key))) return false;
     const operations: SettingsOperation[] = changes.map((change) => ({ ...change, baseline: view.fields[change.key].saved }));
     busy.current = true;
     setSaving(true);
@@ -115,7 +147,7 @@ export function useNativeSettings(cwd?: string | null, sessionId?: string | null
     }
   }, [view, loading, conflicts, url, scope, refresh]);
 
-  return { view, scope, setScope, loading, saving, error, conflicts, refresh, write,
+  return { view, scope, setScope, loading, saving, error, conflicts, refresh, discoverApproval, write,
     set: (key: string, value: unknown) => write([{ key, op: "set", value }]),
     unset: (key: string) => write([{ key, op: "unset" }]),
   };

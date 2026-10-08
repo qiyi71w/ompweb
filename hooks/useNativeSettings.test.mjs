@@ -101,3 +101,25 @@ test("an invalidation received during a pending write is read after success, wit
   await waitFor(() => assert.equal(hook.result.current.view.fields.hideThinkingBlock.effective.value, true));
   assert.equal(reads, 2);
 });
+
+test("entry discovery obtains a server baseline without refreshing existing displayed baselines", async () => {
+  const key = "tools.approval.xd://my.device:v2";
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    const next = view();
+    if (url.includes("approvalKey=")) {
+      next.fields.hideThinkingBlock.saved.token = "external-new";
+      next.fields[key] = { saved: { exists: false, token: "server-new-entry" }, policyKey: "xd://my.device:v2" };
+    }
+    return { ok: true, json: async () => next };
+  };
+  const hook = renderHook(() => useNativeSettings("/workspace"));
+  await waitFor(() => assert.equal(hook.result.current.loading, false));
+  await act(() => hook.result.current.discoverApproval("xd://my.device:v2"));
+  assert.equal(hook.result.current.view.fields.hideThinkingBlock.saved.token, "opaque-original");
+  assert.equal(hook.result.current.view.fields[key].saved.token, "server-new-entry");
+  assert.match(calls[1].url, /approvalKey=xd%3A%2F%2Fmy.device%3Av2/);
+  await act(() => hook.result.current.set(key, "prompt"));
+  assert.deepEqual(JSON.parse(calls[2].options.body).operations, [{ key, op: "set", value: "prompt", baseline: { exists: false, token: "server-new-entry" } }]);
+});

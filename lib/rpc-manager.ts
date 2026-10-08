@@ -5,7 +5,6 @@ import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
-import { readPersistedExtensionApproval } from "./omp/settings-config";
 import { getAgentEnvOverrides } from "./omp/agent-env";
 import {
   cacheSessionPath,
@@ -774,10 +773,7 @@ export class AgentSessionWrapper {
         break;
       }
       case "extension_ui_request": {
-        if (this.trackExtensionUiRequest(event)) {
-          notifyRunningChange();
-          return;
-        }
+        this.trackExtensionUiRequest(event);
         break;
       }
       case "host_tool_call": {
@@ -875,25 +871,12 @@ export class AgentSessionWrapper {
     this.pendingUiRequests.clear();
   }
 
-  private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
+  private trackExtensionUiRequest(event: UnsequencedAgentEvent): void {
     const method = event.method as string;
     const id = event.id as string;
     if (method === "cancel") {
       this.forgetPendingUiRequest(event.targetId as string);
-      return false;
-    }
-    // Only the “Allow tool: <name>” confirmation is covered. Other extension
-    // prompts, including login/editor confirmations, remain interactive.
-    let autoApproveExtension = false;
-    try {
-      autoApproveExtension = readPersistedExtensionApproval() === "allow";
-    } catch {
-      // A malformed config must not prevent normal interactive approval.
-    }
-    if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && autoApproveExtension) {
-      this.forgetPendingUiRequest(id);
-      this.proc.sendFrame({ type: "extension_ui_response", id, confirmed: true });
-      return true;
+      return;
     }
     if (PENDING_UI_METHODS.has(method)) {
       this.forgetPendingUiRequest(id);
@@ -905,14 +888,14 @@ export class AgentSessionWrapper {
         this.uiExpiryTimers.set(id, timer);
       }
       this.pendingUiRequests.set(id, event);
-      return false;
+      return;
     }
     if (method === "setStatus") {
       const key = event.statusKey as string;
       const text = event.statusText as string | undefined;
       if (text === undefined) this.extensionStatuses.delete(key);
       else this.extensionStatuses.set(key, text);
-      return false;
+      return;
     }
     if (method === "setWidget") {
       const key = event.widgetKey as string;
@@ -927,7 +910,6 @@ export class AgentSessionWrapper {
         });
       }
     }
-    return false;
   }
 
   /**

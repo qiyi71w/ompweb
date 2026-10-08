@@ -25,6 +25,8 @@ export interface SettingValue { known: boolean; value?: unknown; redacted?: bool
 export type SettingsReadOnlyReason = "query-failed" | "unregistered" | "unknown-enum" | "complex-value" | "type-mismatch" | "constraint-only" | "project-yaml-unsupported";
 export interface NativeSettingView {
   key: string;
+  /** Literal native tools.approval dictionary member, not a dotted path. */
+  policyKey?: string;
   supported: boolean;
   editable: boolean;
   canUnset: boolean;
@@ -80,7 +82,7 @@ export const NATIVE_SETTINGS_FIELDS: Record<string, SettingDescriptor> = {
   "advisor.immuneTurns": { type: "number", label: "advisorImmuneTurns" },
   "tools.approvalMode": { type: "enum", label: "approvalMode", values: ["always-ask", "write", "yolo"], searchId: "approval-mode" },
   "tools.approval.bash": { type: "enum", label: "bashOverride", parent: "tools.approval", values: ["allow", "prompt", "deny"], searchId: "bash-override" },
-  "tools.approval.extension": { type: "enum", label: "extensionToolRequests", parent: "tools.approval", values: ["allow", "prompt", "deny"], searchId: "extension-tool-requests" },
+  "tools.approval.extension": { type: "enum", label: "approvalPolicy", parent: "tools.approval", values: ["allow", "prompt", "deny"] },
   "skills.showStartupDiagnostics": { type: "boolean", label: "skillStartupNotices", searchId: "skill-startup-notices" },
   enabledModels: { type: "array", label: "enabledModels" },
   disabledProviders: { type: "array", label: "disabledProviders" },
@@ -109,3 +111,15 @@ export const NATIVE_SETTINGS_FIELDS: Record<string, SettingDescriptor> = {
   "mcp.notificationDebounceMs": { type: "number", label: "notificationDebounceMs" },
   "providers.autoThinkingMaxEffort": { type: "enum", label: "autoThinkingMaxEffort", values: ["xhigh", "max"], readOnly: true },
 };
+
+export const APPROVAL_KEY_PREFIX = "tools.approval.";
+
+/** Only the native approval dictionary is open-ended; ordinary fields stay finite. */
+export function getNativeSettingDescriptor(key: string): SettingDescriptor | undefined {
+  if (key.startsWith(APPROVAL_KEY_PREFIX)) {
+    const name = key.slice(APPROVAL_KEY_PREFIX.length);
+    if (!name.length || /[\u0000-\u001f\u007f]/.test(name)) return undefined;
+    return NATIVE_SETTINGS_FIELDS["tools.approval.extension"];
+  }
+  return Object.hasOwn(NATIVE_SETTINGS_FIELDS, key) ? NATIVE_SETTINGS_FIELDS[key] : undefined;
+}

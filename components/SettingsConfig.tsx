@@ -5,7 +5,7 @@ import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBe
 import dynamic from "next/dynamic";
 import { ArrowLeft, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
 import { useNativeSettings } from "@/hooks/useNativeSettings";
-import { NativeSettingsFields, NativeSettingsScopeBar } from "./NativeSettingsFields";
+import { NativeSettingsFields, NativeSettingsScopeBar, NativeToolApprovals } from "./NativeSettingsFields";
 import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from "@/lib/omp/agent-env-policy";
 import { isRecord } from "@/lib/type-guards";
 import { Alert } from "@/components/ui/field";
@@ -141,8 +141,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
-  { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
-  { id: "extension-tool-requests", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.extensionToolRequests", descKey: "settingsConfig.extensionToolRequestsDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Extension Tool Requests", fallbackDesc: "Automatically approve extension tool authorization requests.", scope: "Native OMP" },
+  { id: "tool-approval-policies", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalPolicy", descKey: "nativeSettings.approval.description", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Per-tool approval policies", fallbackDesc: "Manage literal native tool names or policy keys without replacing other entries.", scope: "Native OMP" },
   // AI Model Defaults
   { id: "reasoning", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.reasoning", descKey: "settingsConfig.reasoningDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Reasoning", fallbackDesc: "Default effort level for thinking-capable models.", scope: "Native OMP" },
   { id: "auto-thinking-source", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.autoThinkingSource", descKey: "settingsConfig.autoThinkingSourceDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Auto Thinking Source", fallbackDesc: "Choose prompt classification or the publisher default with omp fallback.", scope: "Native OMP" },
@@ -1057,7 +1056,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.toolSafetyApprovalsDesc")}</p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                  <NativeSettingsFields controller={native} keys={["tools.approvalMode", "tools.approval.bash", "tools.approval.extension"]} />
+                  <NativeToolApprovals controller={native} />
                 </div>
               </div>
             )}

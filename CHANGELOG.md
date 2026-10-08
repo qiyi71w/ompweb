@@ -8,6 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
+- Manage native per-tool approval dictionary entries in Safety & Approvals, including custom and MCP tool names, literal policy keys, server-baselined entry creation and scoped inheritance, with English, Chinese and Japanese guidance.
 - Show native effective values separately from saved overrides across Settings, Retry & fallback and the Native OMP registry. Choose global/profile or workspace scope, restore inheritance per field, inspect the automatic-thinking ceiling, and see unsupported capabilities and application timing in English, Chinese and Japanese.
 - Choose **Classifier** or **Vendor default** in Settings → AI Model Defaults → **Auto Thinking Source** when Reasoning is `auto`. The choice is saved in omp's native config for newly started or restarted agents. Vendor mode prefers the publisher's effort, then omp's per-model default, then normal Auto fallback. Requires an omp release containing [can1357/oh-my-pi#14114](https://github.com/can1357/oh-my-pi/pull/14114).
 - Show conflicting skill names and deduplicated installations when an OMP session starts, with resolution details, a **×** button that dismisses the notice for the session until the diagnostic report changes, and a persisted **Turn off** action that disables startup notices. Inspect a running session manually in **Settings → Extensions & Tools → Skills**, even when notices are off; inspection never resumes a stopped session. Requires an OMP runtime with the skill-diagnostics RPC commands; older runtimes report live diagnostics as unavailable.
@@ -33,6 +34,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Keep tool authorization and execution under native `allow` / `prompt` / `deny` policies. Web confirmation titles no longer trigger automatic approval from the legacy `extension` entry; tool, login and editor requests wait for user responses. Per-entry changes preserve sibling policies, punctuation, comments and same-field conflict protection.
 - Save explicit native-setting operations with per-field baselines: unrelated CLI edits merge, same-field edits return a visible conflict, and YAML comments, unknown data, explicit empty values and legacy compaction intent are retained. Use native enum/numeric domains, including `strict`, `sharpshooter` and values outside former UI caps. Preserve global `config.yaml`; explain and protect the project `config.yaml` target ignored by OMP 18.8.4. Failed native/YAML queries remain read-only; configuration saves refresh registry consumers after active utility work without stopping sessions.
 - Balance the composer icons on phones and narrow toolbars with a slightly smaller effort-level icon and a larger Slow-mode snail, while keeping menu icon sizes unchanged.
 - Keep the model picker on the left and reasoning effort, Fast, Slow, microphone, and Send/Stop controls in a right-aligned composer group, including wrapped mobile rows.
