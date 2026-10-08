@@ -34,6 +34,11 @@ and `renderHook` for hook state and lifecycle tests. Keep the real jsdom
 
 Static HTML tests can continue using `react-dom/server`. Layout, scrolling,
 and native browser navigation still require real-browser verification.
+Assert observable API and component behavior rather than source strings or
+internal cache wiring. Native configuration acceptance must identify the
+candidate, installed OMP binary and context; capability fixtures do not certify
+an untested OMP release or operating system.
+
 The jsdom dependency stays on 29.x to support the Node 22.19.0 baseline.
 
 ## Conventions

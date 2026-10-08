@@ -588,7 +588,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, []);
+  }, [t]);
 
   const processTextFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -646,7 +646,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
-  }, []);
+  }, [t]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));

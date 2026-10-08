@@ -305,7 +305,7 @@ export function AppShell({ appName }: { appName: string }) {
     if (container && active instanceof HTMLElement && container.contains(active)) {
       active.blur();
     }
-  }, [sidebarOpen, mobileSidebarReady]);
+  }, [sidebarOpen, mobileSidebarReady, sidebarContainerRef]);
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/omp-update", {
@@ -850,7 +850,7 @@ export function AppShell({ appName }: { appName: string }) {
     sidebarResizeHandlersRef.current = { onMove, onUp };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [isMobile, sidebarWidth]);
+  }, [isMobile, sidebarWidth, sidebarContainerRef]);
 
   // If the app unmounts mid-drag, remove the window listeners and restore the
   // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
@@ -864,82 +864,6 @@ export function AppShell({ appName }: { appName: string }) {
     document.body.style.userSelect = "";
   }, []);
 
-  const resetRightPanelWidth = useCallback(() => {
-    rightPanelRef.current?.style.removeProperty("--right-panel-width");
-    setRightPanelWidth(null);
-  }, []);
-
-  const changeRightPanelWidth = useCallback((delta: number) => {
-    setRightPanelWidth((prev) => {
-      // Keyboard steps from the fluid default start at the panel's live
-      // width so the first press doesn't jump to the clamp minimum.
-      const base = prev ?? rightPanelRef.current?.getBoundingClientRect().width ?? RIGHT_PANEL_MIN_WIDTH;
-      const next = clampRightPanelWidth(base + delta);
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      return next;
-    });
-  }, []);
-
-  const handleRightPanelResizeKey = useCallback((e: React.KeyboardEvent) => {
-    // The handle sits on the panel's left edge: left widens, right narrows.
-    if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      changeRightPanelWidth(10);
-    } else if (e.key === "ArrowRight") {
-      e.preventDefault();
-      changeRightPanelWidth(-10);
-    } else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      resetRightPanelWidth();
-    }
-  }, [changeRightPanelWidth, resetRightPanelWidth]);
-
-  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
-    if (isMobile) return;
-    e.preventDefault();
-    const startX = e.clientX;
-    // Live rect, not state: it always reflects the committed width (custom or
-    // fluid default), and keeps this callback above the state declarations
-    // without a TDZ cycle. The handle only exists while the panel is open.
-    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
-      ?? RIGHT_PANEL_MIN_WIDTH;
-    // Same --ui-scale ground truth as the left sidebar handle: clientX is in
-    // viewport pixels while the panel width is zoomed layout pixels.
-    let uiScale = 1;
-    try {
-      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
-      const value = parseFloat(raw);
-      if (Number.isFinite(value) && value > 0) uiScale = value;
-    } catch {
-      // SSR/unavailable: fall back to unscaled math.
-    }
-    setRightPanelResizing(true);
-    const onMove = (ev: MouseEvent) => {
-      // Dragging the left edge left grows the panel: inverse of the sidebar.
-      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
-      // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      pendingRightPanelWidthRef.current = next;
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      rightResizeHandlersRef.current = null;
-      setRightPanelResizing(false);
-      // Commit the final width so state and the persisted value agree with
-      // what the user actually dragged to.
-      setRightPanelWidth(pendingRightPanelWidthRef.current);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    pendingRightPanelWidthRef.current = startWidth;
-    rightResizeHandlersRef.current = { onMove, onUp };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [isMobile]);
 
   // If the app unmounts mid-drag, remove the window listeners and restore the
   // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
@@ -1016,6 +940,82 @@ export function AppShell({ appName }: { appName: string }) {
   });
   const pendingRightPanelWidthRef = useRef<number | null>(null);
   const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  const resetRightPanelWidth = useCallback(() => {
+    rightPanelRef.current?.style.removeProperty("--right-panel-width");
+    setRightPanelWidth(null);
+  }, [rightPanelRef]);
+
+  const changeRightPanelWidth = useCallback((delta: number) => {
+    setRightPanelWidth((prev) => {
+      // Keyboard steps from the fluid default start at the panel's live
+      // width so the first press doesn't jump to the clamp minimum.
+      const base = prev ?? rightPanelRef.current?.getBoundingClientRect().width ?? RIGHT_PANEL_MIN_WIDTH;
+      const next = clampRightPanelWidth(base + delta);
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      return next;
+    });
+  }, [rightPanelRef]);
+
+  const handleRightPanelResizeKey = useCallback((e: React.KeyboardEvent) => {
+    // The handle sits on the panel's left edge: left widens, right narrows.
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      changeRightPanelWidth(10);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      changeRightPanelWidth(-10);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      resetRightPanelWidth();
+    }
+  }, [changeRightPanelWidth, resetRightPanelWidth]);
+
+  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
+    if (isMobile) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    // Live rect, not state: it always reflects the committed width (custom or
+    // fluid default), and keeps this callback above the state declarations
+    // without a TDZ cycle. The handle only exists while the panel is open.
+    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
+      ?? RIGHT_PANEL_MIN_WIDTH;
+    // Same --ui-scale ground truth as the left sidebar handle: clientX is in
+    // viewport pixels while the panel width is zoomed layout pixels.
+    let uiScale = 1;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+      const value = parseFloat(raw);
+      if (Number.isFinite(value) && value > 0) uiScale = value;
+    } catch {
+      // SSR/unavailable: fall back to unscaled math.
+    }
+    setRightPanelResizing(true);
+    const onMove = (ev: MouseEvent) => {
+      // Dragging the left edge left grows the panel: inverse of the sidebar.
+      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
+      // Write the CSS variable straight to the DOM: the flex row follows the
+      // pointer without re-rendering the whole AppShell on every mousemove.
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      pendingRightPanelWidthRef.current = next;
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      rightResizeHandlersRef.current = null;
+      setRightPanelResizing(false);
+      // Commit the final width so state and the persisted value agree with
+      // what the user actually dragged to.
+      setRightPanelWidth(pendingRightPanelWidthRef.current);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    pendingRightPanelWidthRef.current = startWidth;
+    rightResizeHandlersRef.current = { onMove, onUp };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [isMobile, rightPanelRef]);
   useEffect(() => {
     setRightPanelWidth(loadRightPanelWidth());
   }, []);
