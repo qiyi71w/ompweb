@@ -47,6 +47,16 @@ export interface SkillInfo {
   /** False when the SKILL.md sits outside the user-owned skill roots
    * (plugin, registry, custom directory): listed, but not rewritable. */
   togglable?: boolean;
+  installed?: boolean;
+  discovered?: boolean;
+  loaded?: "unknown";
+  toggleBaseline?: string;
+}
+
+export interface SkillsDiscovery {
+  authority: "native" | "fallback";
+  reason?: "binary-unavailable" | "query-failed";
+  sourceSwitches: Record<string, boolean | null>;
 }
 
 export type PluginScope = "global" | "project";
@@ -84,7 +94,7 @@ export interface PluginPackageInfo {
   configuredVersion?: string;
   counts: PluginResourceCounts;
   resources: PluginResourceInfo[];
-  status: "loaded" | "installed" | "missing" | "disabled";
+  status: "installed" | "missing" | "disabled";
 }
 
 export interface PluginsResponse {

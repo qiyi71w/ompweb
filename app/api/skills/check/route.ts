@@ -3,6 +3,7 @@ import type { SkillInstallScope } from "@/lib/api-types";
 import { checkSkillUpdates } from "@/lib/skill-updates";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { resolveConfigurationContext } from "@/lib/omp/configuration-context";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json() as {
       cwd?: unknown;
+      sessionId?: string;
       package?: unknown;
       scope?: unknown;
     };
@@ -28,7 +30,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "package and scope must be provided together", code: "package_scope_together" }, { status: 400 });
     }
 
-    const { skills } = await loadSkillsWithInstallInfo(cwd);
+    const context = await resolveConfigurationContext({ cwd, sessionId: body.sessionId });
+    const { skills } = await loadSkillsWithInstallInfo(context);
     const installs = skills
       .map((skill) => skill.install)
       .filter((install): install is NonNullable<typeof install> => Boolean(install))
@@ -39,7 +42,7 @@ export async function POST(req: Request) {
     }
 
     const updates = await checkSkillUpdates(installs, {
-      githubToken: process.env.GITHUB_TOKEN || process.env.GH_TOKEN,
+      githubToken: context.env.GITHUB_TOKEN || context.env.GH_TOKEN,
     });
     return NextResponse.json({ updates });
   } catch (error) {

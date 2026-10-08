@@ -4,6 +4,7 @@ import type { SkillInstallScope } from "@/lib/api-types";
 import { buildSkillUpdateArgs } from "@/lib/skill-updates";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { resolveConfigurationContext } from "@/lib/omp/configuration-context";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json() as {
       cwd?: unknown;
+      sessionId?: string;
       package?: unknown;
       scope?: unknown;
     };
@@ -27,11 +29,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
 
-    const { skills } = await loadSkillsWithInstallInfo(cwd);
+    const context = await resolveConfigurationContext({ cwd, sessionId: body.sessionId });
+    const { skills } = await loadSkillsWithInstallInfo(context);
     const skill = skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );
-    if (!skill?.install) {
+    if (!skill?.install || !skill.togglable) {
       return NextResponse.json({ error: "Installed skill not found", code: "skill_not_installed" }, { status: 404 });
     }
     if (!skill.install.canCheckForUpdates) {
@@ -40,11 +43,11 @@ export async function POST(req: Request) {
 
     const { stdout, stderr } = await runNpx(buildSkillUpdateArgs(skill.install), {
       timeout: 60_000,
-      cwd: scope === "project" ? cwd : undefined,
-      env: { ...process.env, FORCE_COLOR: "0" },
+      cwd: context.view.cwd,
+      env: { ...context.env, FORCE_COLOR: "0" },
     });
 
-    const refreshed = await loadSkillsWithInstallInfo(cwd);
+    const refreshed = await loadSkillsWithInstallInfo(context);
     const updatedSkill = refreshed.skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );

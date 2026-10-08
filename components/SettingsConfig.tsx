@@ -739,7 +739,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [ompUpdating, t, checkForUpdate, restartSessions]);
 
 
-  const currentTab = activeTab === "skills" ? activeTab : getNormalizedActive(activeTab);
+  const currentTab = activeTab === "skills" || activeTab === "plugins" ? activeTab : getNormalizedActive(activeTab);
   const nativeSettingsRequired = currentTab === "general" || currentTab === "safety" || currentTab === "models" || currentTab === "intelligence" || currentTab === "mcp";
   useEffect(() => {
     if (currentTab === "system") {
@@ -1151,6 +1151,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.extensionsTools")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
                   {cwd && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
+                  {cwd && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("plugins")}>{t("pluginsConfig.title")}</button>}
                 </div>
                 {cwd && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
@@ -1165,14 +1166,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             {/* SKILLS SUB-PANEL CONTRACT MATCH */}
             {cwd && currentTab === "skills" && (
               <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-mcp" className="settings-panel-inner" style={{ display: currentTab === "skills" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <SkillsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} />
+                <SkillsConfig key={`${cwd}\0${sessionId ?? ""}`} embedded cwd={cwd} sessionId={sessionId} onClose={onClose} />
               </div>
             )}
 
             {/* PLUGINS SUB-PANEL CONTRACT MATCH */}
             {cwd && currentTab === "plugins" && (
-              <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" className="settings-panel-inner" style={{ display: currentTab === "plugins" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
+              <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-mcp" className="settings-panel-inner" style={{ display: currentTab === "plugins" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
+                <PluginsConfig key={`${cwd}\0${sessionId ?? ""}`} embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
               </div>
             )}
 
@@ -1202,7 +1203,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     {t("settingsConfig.agentsDesc")}
                   </p>
                 </div>
-                <AgentsConfig cwd={cwd} />
+                <AgentsConfig key={`${cwd}\0${sessionId ?? ""}`} cwd={cwd} sessionId={sessionId} />
               </div>
             )}
 

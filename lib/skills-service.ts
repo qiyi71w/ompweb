@@ -1,15 +1,17 @@
 import { execFile } from "child_process";
-import { existsSync, promises as fs } from "fs";
+import { existsSync, readFileSync, promises as fs } from "fs";
 import { homedir } from "os";
 import * as path from "path";
 import { promisify } from "util";
 import { parse as parseYaml } from "yaml";
 import { existingPathWithinRootsChecker, getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
-import { resolveOmpBin, versionFingerprint, wrapWindowsScript } from "@/lib/omp/omp-cli";
-import { getAgentDir } from "@/lib/omp/paths";
+import { wrapWindowsScript } from "@/lib/omp/omp-cli";
+import type { OmpConfigurationContext } from "@/lib/omp/configuration-context";
+import { readNativeSkillSettings } from "@/lib/omp/settings-config";
+import { configurationBaseline, configurationFileIdentity } from "@/lib/omp/configuration-file";
 import { isRecord } from "@/lib/type-guards";
-import type { SkillInfo } from "@/lib/api-types";
-import { annotateSkillsWithInstallInfo } from "@/lib/skill-lock";
+import type { SkillInfo, SkillsDiscovery } from "@/lib/api-types";
+import { annotateSkillsWithInstallInfo, getGlobalSkillsLockPath } from "@/lib/skill-lock";
 
 /**
  * Pure-Node skill discovery mirroring omp's providers
@@ -68,8 +70,7 @@ function isTruthyFlag(value: unknown): boolean {
 
 /** Ancestor directories from cwd up to the git repo root (or $HOME / fs root),
  * closest first — matches omp's project-level walk-up discovery. */
-function getAncestorDirs(cwd: string): string[] {
-  const home = homedir();
+function getAncestorDirs(cwd: string, home: string): string[] {
   const dirs: string[] = [];
   let current = path.resolve(cwd);
   while (true) {
@@ -85,10 +86,11 @@ function getAncestorDirs(cwd: string): string[] {
 
 /** Scan roots in omp's provider priority order (highest first): .omp (100),
  * .claude (80), .agent/.agents + .codex + .github (70), managed skills (5). */
-function buildScanRoots(cwd: string): SkillScanRoot[] {
-  const home = homedir();
-  const agentDir = getAgentDir();
-  const ancestors = getAncestorDirs(cwd);
+function buildScanRoots(context: OmpConfigurationContext): SkillScanRoot[] {
+  const cwd = context.view.cwd;
+  const home = context.env.HOME || context.env.USERPROFILE || homedir();
+  const agentDir = context.view.agentDir;
+  const ancestors = getAncestorDirs(cwd, home);
   const projectAncestors = ancestors.filter((dir) => dir !== home);
   const roots: SkillScanRoot[] = [];
 
@@ -99,7 +101,7 @@ function buildScanRoots(cwd: string): SkillScanRoot[] {
   roots.push({ dir: path.join(agentDir, "skills"), source: ".omp", scope: "user", requireDescription: true });
 
   // claude compat: user ~/.claude/skills + project .claude/skills walk-up.
-  const claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
+  const claudeHome = context.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
   roots.push({ dir: path.join(claudeHome, "skills"), source: ".claude", scope: "user" });
   for (const dir of projectAncestors) {
     roots.push({ dir: path.join(dir, ".claude", "skills"), source: ".claude", scope: "project" });
@@ -131,8 +133,8 @@ function buildScanRoots(cwd: string): SkillScanRoot[] {
  * skill path (single source of truth with buildScanRoots — a narrower list
  * would reject skills the app itself discovered and installed). Without a cwd
  * only the cwd-independent user-scope roots are returned. */
-export function getSkillScanRootDirs(cwd?: string): string[] {
-  return buildScanRoots(cwd ?? homedir()).map((root) => root.dir);
+export function getSkillScanRootDirs(context: OmpConfigurationContext): string[] {
+  return buildScanRoots(context).map((root) => root.dir);
 }
 
 const DISABLE_INVOCATION_KEYS = ["disable-model-invocation", "disableModelInvocation", "hide"] as const;
@@ -148,6 +150,20 @@ export function readDisableModelInvocation(frontmatter: Record<string, unknown>)
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/;
 const DISABLE_KEY_LINE_RE = new RegExp(`^(?:${DISABLE_INVOCATION_KEYS.join("|")})[ \\t]*:.*$`);
+
+export function skillToggleBaseline(context: OmpConfigurationContext, filePath: string, content: string): string {
+  const match = FRONTMATTER_RE.exec(content);
+  const frontmatter: unknown = match ? parseYaml(match[1]) : {};
+  if (!isRecord(frontmatter)) throw new Error("Skill frontmatter is not a YAML mapping");
+  for (const key of DISABLE_INVOCATION_KEYS) {
+    if (!Object.hasOwn(frontmatter, key)) continue;
+    const value = frontmatter[key];
+    if ((typeof value !== "boolean" && value !== "true" && value !== "false") || !match?.[1].split(/\r?\n/).some((line) => line.startsWith(`${key}:`))) {
+      throw new Error("Skill invocation metadata requires native editing");
+    }
+  }
+  return configurationBaseline([context.view.id, configurationFileIdentity(filePath), DISABLE_INVOCATION_KEYS.map((key) => ({ key, exists: Object.hasOwn(frontmatter, key), value: frontmatter[key] }))]);
+}
 
 /** Set/clear the disable-model-invocation flag in a SKILL.md, editing the key
  * line already present (in whichever of the three spellings) instead of
@@ -290,35 +306,13 @@ export function skillsFromCliPayload(data: unknown): SkillsWithDiagnostics | und
 
 const execFileAsync = promisify(execFile);
 const SKILLS_CLI_TIMEOUT_MS = 15_000;
-// A `skill list` that failed (binary predates the command, hangs, bad output,
-// or omp rejects this project's config) is not re-spawned for the same binary
-// and cwd until the binary changes on disk or this expires. Keyed per cwd so
-// one broken project cannot hide omp's listing for every other project.
-const SKILLS_CLI_MISS_TTL_MS = 5 * 60_000;
-const skillsCliMisses = new Map<string, number>();
-
-/**
- * Ask the omp binary for its skill listing (`omp skill list --json` run in cwd,
- * omp >= 18.3.3). The binary is the authoritative source — the same discovery
- * sessions use, including namespaced collision aliases this replica cannot
- * reproduce — and every exec re-reads disk, so installs, uninstalls and
- * toggles show immediately. Returns undefined when no binary is available,
- * when the binary predates the command, or on any exec/parse failure, letting
- * the caller fall back to the replica scan.
- */
-async function discoverSkillsViaCli(cwd: string, ompBin: string | null): Promise<SkillsWithDiagnostics | undefined> {
-  if (!ompBin) return undefined;
-  const cwdPath = path.resolve(cwd);
-  const missKey = `${versionFingerprint(ompBin) ?? ompBin}\0${cwdPath}`;
-  const now = Date.now();
-  if ((skillsCliMisses.get(missKey) ?? 0) > now) return undefined;
-  // Windows .cmd/.bat launchers need cmd.exe, as in the version probe. The
-  // directory goes in as the process cwd, never as an argument: cmd.exe would
-  // interpret `&` and friends in a directory name.
-  const target = wrapWindowsScript(ompBin, ["skill", "list", "--json"]);
+async function discoverSkillsViaCli(context: OmpConfigurationContext): Promise<SkillsWithDiagnostics | undefined> {
+  if (!context.view.binary) return undefined;
+  const target = wrapWindowsScript(context.view.binary, [...context.queryArgs, "skill", "list", "--json"]);
   try {
     const { stdout } = await execFileAsync(target.file, target.args, {
-      cwd: cwdPath,
+      cwd: context.view.cwd,
+      env: context.env,
       timeout: SKILLS_CLI_TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
@@ -328,33 +322,42 @@ async function discoverSkillsViaCli(cwd: string, ompBin: string | null): Promise
   } catch {
     // Missing/old binary, exec or parse failure — fall back to the replica.
   }
-  for (const [key, retryAt] of skillsCliMisses) if (retryAt <= now) skillsCliMisses.delete(key);
-  skillsCliMisses.set(missKey, now + SKILLS_CLI_MISS_TTL_MS);
   return undefined;
 }
 
-/** Discover skills for a cwd the way omp does: through the omp binary when it
- * supports `skill list`, else the replica scan below. In the replica, name
- * collisions resolve to the highest-priority provider (scan-root order);
- * result is sorted by name. `ompBin` is a test seam. */
-export async function discoverSkills(
-  cwd: string,
-  ompBin: string | null = resolveOmpBin(),
-): Promise<SkillsWithDiagnostics> {
-  const viaCli = await discoverSkillsViaCli(cwd, ompBin);
-  if (viaCli) return viaCli;
+const SOURCE_SETTING_PROVIDER: Record<string, string> = { ".omp": "Pi", ".claude": "Claude", ".agents": "Agents", ".codex": "Codex" };
+
+function sourceEnabled(root: SkillScanRoot, settings: Record<string, unknown>): boolean {
+  if (settings["skills.enabled"] === false) return false;
+  const provider = SOURCE_SETTING_PROVIDER[root.source];
+  const key = provider ? `skills.enable${provider}${root.scope === "user" ? "User" : "Project"}` : undefined;
+  return !key || settings[key] !== false;
+}
+
+/** Native listing is authoritative discovery, never proof of active-session loading. */
+export async function discoverSkills(context: OmpConfigurationContext): Promise<SkillsWithDiagnostics & { discovery: SkillsDiscovery }> {
+  let invalidConfiguration = false;
+  const settings = await readNativeSkillSettings(context).catch((error: unknown) => {
+    invalidConfiguration = error instanceof Error && /YAML/.test(error.message);
+    return {} as Record<string, unknown>;
+  });
+  const sourceSwitches = Object.fromEntries([
+    "skills.enabled", "skills.enableCodexUser", "skills.enableClaudeUser", "skills.enableClaudeProject",
+    "skills.enablePiUser", "skills.enablePiProject", "skills.enableAgentsUser", "skills.enableAgentsProject",
+  ].map((key) => [key, typeof settings[key] === "boolean" ? settings[key] as boolean : null]));
+  const viaCli = invalidConfiguration ? undefined : await discoverSkillsViaCli(context);
+  if (viaCli) return { ...viaCli, discovery: { authority: "native", sourceSwitches } };
   const diagnostics: SkillDiagnostic[] = [];
   const byName = new Map<string, SkillInfo>();
-  for (const root of buildScanRoots(cwd)) {
+  for (const root of buildScanRoots(context)) {
+    if (!sourceEnabled(root, settings)) continue;
     for (const skill of await scanRoot(root, diagnostics)) {
+      if (Array.isArray(settings["skills.ignoredSkills"]) && settings["skills.ignoredSkills"].includes(skill.name)) continue;
       if (!byName.has(skill.name)) byName.set(skill.name, skill);
     }
   }
-  const skills = [...byName.values()].sort((a, b) => {
-    const cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-    return cmp !== 0 ? cmp : a.filePath.localeCompare(b.filePath);
-  });
-  return { skills, diagnostics };
+  const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name) || a.filePath.localeCompare(b.filePath));
+  return { skills, diagnostics, discovery: { authority: "fallback", reason: context.view.binary ? "query-failed" : "binary-unavailable", sourceSwitches } };
 }
 
 /**
@@ -366,22 +369,46 @@ export async function discoverSkills(
  * custom directories outside a workspace) are read-only: their files belong
  * to an installer and an update would discard the edit.
  */
-export async function getSkillToggleRoots(cwd?: string): Promise<Set<string>> {
-  // Copy: getAllowedFileRoots returns its shared cache set.
+export async function getSkillToggleRoots(context: OmpConfigurationContext): Promise<Set<string>> {
   const roots = new Set(await getAllowedFileRoots());
-  const scanCwd = cwd && isExistingFilePathAllowed(cwd, roots) ? cwd : undefined;
-  for (const dir of getSkillScanRootDirs(scanCwd)) roots.add(dir);
+  for (const root of buildScanRoots(context)) {
+    if (root.scope === "user" || isExistingFilePathAllowed(context.view.cwd, roots)) roots.add(root.dir);
+  }
   return roots;
 }
 
-export async function loadSkillsWithInstallInfo(cwd: string, ompBin: string | null = resolveOmpBin()) {
-  const [{ skills, diagnostics }, toggleRoots] = await Promise.all([discoverSkills(cwd, ompBin), getSkillToggleRoots(cwd)]);
+export async function loadSkillsWithInstallInfo(context: OmpConfigurationContext) {
+  const [result, toggleRoots] = await Promise.all([discoverSkills(context), getSkillToggleRoots(context)]);
   const isTogglable = existingPathWithinRootsChecker(toggleRoots);
+  const discoveredPaths = new Set(result.skills.map((skill) => skill.filePath));
+  const inventory = new Map(result.skills.map((skill) => [skill.filePath, skill]));
+  // Disabled sources can still contain installed files. Keep inventory separate
+  // from discovery; neither a disk scan nor CLI visibility grants write access.
+  for (const root of buildScanRoots(context)) {
+    for (const skill of await scanRoot(root, [])) if (!inventory.has(skill.filePath)) inventory.set(skill.filePath, skill);
+  }
+  const home = context.env.HOME || context.env.USERPROFILE || homedir();
   return {
-    skills: annotateSkillsWithInstallInfo(skills, { cwd, agentDir: getAgentDir() }).map((skill) => ({
-      ...skill,
-      togglable: isTogglable(skill.filePath),
-    })),
-    diagnostics,
+    ...result,
+    context: context.view,
+    skills: annotateSkillsWithInstallInfo([...inventory.values()], {
+      cwd: context.view.cwd, agentDir: context.view.agentDir, homeDir: home,
+      globalLockPath: getGlobalSkillsLockPath({ homeDir: home, xdgStateHome: context.env.XDG_STATE_HOME }),
+    }).map((skill) => {
+      let toggleBaseline: string | undefined;
+      const owned = isTogglable(skill.filePath) && !/plugin|registry/.test(skill.sourceInfo.source ?? "");
+      if (owned) {
+        try { toggleBaseline = skillToggleBaseline(context, skill.filePath, readFileSync(skill.filePath, "utf8")); }
+        catch { /* Missing or invalid files remain visible, never writable. */ }
+      }
+      return {
+        ...skill,
+        installed: existsSync(skill.filePath),
+        discovered: discoveredPaths.has(skill.filePath),
+        loaded: "unknown" as const,
+        togglable: owned && !!toggleBaseline,
+        toggleBaseline,
+      };
+    }),
   };
 }
