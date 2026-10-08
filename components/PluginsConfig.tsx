@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { NATIVE_SETTINGS_CHANGED_EVENT } from "@/hooks/useNativeSettings";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import {
@@ -78,7 +79,6 @@ function findInstalledPackage(
 }
 
 function statusColor(status: PluginPackageInfo["status"]): string {
-  if (status === "loaded") return "var(--accent)";
   if (status === "installed") return "var(--status-warning)";
   if (status === "disabled") return "var(--text-dim)";
   return "var(--status-error)";
@@ -89,7 +89,6 @@ function scopeKey(scope: PluginScope): string {
 }
 
 const STATUS_KEYS: Record<PluginPackageInfo["status"], string> = {
-  loaded: "pluginsConfig.statusLoaded",
   installed: "pluginsConfig.statusInstalled",
   missing: "pluginsConfig.statusMissing",
   disabled: "pluginsConfig.statusDisabled",
@@ -651,7 +650,9 @@ export function PluginsConfig({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/plugins?cwd=${encodeURIComponent(cwd)}`);
+      const params = new URLSearchParams({ cwd });
+      if (sessionId) params.set("sessionId", sessionId);
+      const res = await fetch(`/api/plugins?${params}`);
       const next = (await res.json()) as PluginsResponse & { error?: string; code?: string };
       if (!res.ok || next.error) throw new Error(formatApiError(next.error ? next : `HTTP ${res.status}`));
       setData(next);
@@ -665,7 +666,7 @@ export function PluginsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, sessionId]);
 
   useEffect(() => {
     void loadPlugins();
@@ -680,11 +681,12 @@ export function PluginsConfig({
       const res = await fetch("/api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, source: pkg.source, scope: pkg.scope, cwd }),
+        body: JSON.stringify({ action, source: pkg.source, scope: pkg.scope, cwd, sessionId }),
       });
       const next = (await res.json()) as PluginsResponse & { error?: string; code?: string };
       if (!res.ok || next.error) throw new Error(formatApiError(next.error ? next : `HTTP ${res.status}`));
       setData(next);
+      window.dispatchEvent(new Event(NATIVE_SETTINGS_CHANGED_EVENT));
       if (action === "remove") {
         setSelected(next.packages[0] ? packageKey(next.packages[0]) : null);
         if (next.packages.length === 0) setAddMode(true);
@@ -707,7 +709,7 @@ export function PluginsConfig({
     } finally {
       setBusyKey(null);
     }
-  }, [cwd, t]);
+  }, [cwd, sessionId, t]);
 
   const installPlugin = useCallback(async () => {
     const source = installSource.trim();
@@ -720,11 +722,12 @@ export function PluginsConfig({
       const res = await fetch("/api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "install", source, scope: installScope, cwd }),
+        body: JSON.stringify({ action: "install", source, scope: installScope, cwd, sessionId }),
       });
       const next = (await res.json()) as PluginsResponse & { error?: string; code?: string };
       if (!res.ok || next.error) throw new Error(formatApiError(next.error ? next : `HTTP ${res.status}`));
       setData(next);
+      window.dispatchEvent(new Event(NATIVE_SETTINGS_CHANGED_EVENT));
       const installed = findInstalledPackage(next.packages, source, installScope);
       setSelected(installed ? packageKey(installed) : key);
       setAddMode(false);
@@ -735,7 +738,7 @@ export function PluginsConfig({
     } finally {
       setBusyKey(null);
     }
-  }, [cwd, installScope, installSource, t]);
+  }, [cwd, sessionId, installScope, installSource, t]);
 
   const reloadSession = useCallback(async () => {
     if (!sessionId) return;
@@ -802,6 +805,7 @@ export function PluginsConfig({
           </button>
         </div>)}
         {!embedded && onSelectTab && <SettingsTabs active="plugins" onSelect={onSelectTab} />}
+        <p className="text-sm text-muted px-3 py-2">{t("pluginsConfig.inventoryBoundary")}</p>
 
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
           <div

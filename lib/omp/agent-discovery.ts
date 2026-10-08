@@ -37,7 +37,8 @@ export function agentPluginRoots(context: OmpConfigurationContext, settings: Rec
   const home = context.env.HOME || context.env.USERPROFILE || homedir();
   const cwd = context.view.cwd;
   const anchor = agentProjectAnchor(cwd, home);
-  const userRoot = join(home, context.env.PI_CONFIG_DIR || ".omp", "plugins");
+  const configRoot = join(home, context.env.PI_CONFIG_DIR || ".omp");
+  const userRoot = context.view.profile ? join(configRoot, "profiles", context.view.profile, "plugins") : join(configRoot, "plugins");
   const projectRoot = anchor ? join(anchor, ".omp", "plugins") : undefined;
   const claudeRoot = context.env.CLAUDE_CONFIG_DIR || join(home, ".claude");
   const disabled = settings.disabledProviders;

@@ -9,7 +9,7 @@ import { useI18n } from "@/lib/i18n";
 import type { AgentInfo } from "@/lib/omp/agents-service";
 import type { AgentTemplateView } from "@/lib/omp/agent-template";
 import type { SettingsOperation } from "@/lib/omp/settings-contract";
-import { useNativeSettings } from "@/hooks/useNativeSettings";
+import { NATIVE_SETTINGS_CHANGED_EVENT, useNativeSettings } from "@/hooks/useNativeSettings";
 import { NativeSettingsFields, NativeSettingsScopeBar } from "./NativeSettingsFields";
 
 type AgentsResponse = {
@@ -32,7 +32,7 @@ function shorten(p: string) {
 function splitCsv(v: string): string[] { return v.split(",").map((s) => s.trim()).filter(Boolean); }
 function toCsv(value: unknown): string { return typeof value === "string" ? value : Array.isArray(value) ? value.join(", ") : ""; }
 
-export function AgentsConfig({ cwd }: { cwd: string | null }) {
+export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: string | null }) {
   const { t, tn } = useI18n();
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,7 +45,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
   const [createScope, setCreateScope] = useState<"user" | "project">("user");
   const [workspaceUnavailable, setWorkspaceUnavailable] = useState(false);
   const [workspaceCheckPending, setWorkspaceCheckPending] = useState(Boolean(cwd));
-  const native = useNativeSettings(workspaceUnavailable ? null : cwd);
+  const native = useNativeSettings(workspaceUnavailable ? null : cwd, sessionId);
   const [contextId, setContextId] = useState("");
   const [edits, setEdits] = useState<Record<string, "set" | "unset">>({});
   const [conflict, setConflict] = useState(false);
@@ -53,6 +53,8 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
   const loadGenerationRef = useRef(0);
   const cwdRef = useRef(cwd);
   cwdRef.current = cwd;
+  const sessionRef = useRef(sessionId);
+  sessionRef.current = sessionId;
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [modelCsv, setModelCsv] = useState("");
@@ -64,18 +66,19 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
   const load = useCallback(async (forceSelect = false) => {
     const generation = ++loadGenerationRef.current;
     const requestCwd = cwd;
-    const isCurrent = () => loadGenerationRef.current === generation && cwdRef.current === requestCwd;
+    const isCurrent = () => loadGenerationRef.current === generation && cwdRef.current === requestCwd && sessionRef.current === sessionId;
     setLoading(true);
     setMessage(null);
     setWorkspaceCheckPending(Boolean(requestCwd));
     try {
       const params = new URLSearchParams();
       if (cwd) params.set("cwd", cwd);
+      if (sessionId) params.set("sessionId", sessionId);
       let res = await fetch(`/api/agents?${params.toString()}`);
       let data = (await res.json()) as AgentsResponse;
       if (!isCurrent()) return;
       if (!res.ok || data.error) {
-        if (!requestCwd || res.status !== 403) throw new Error(data.error || `HTTP ${res.status}`);
+        if (sessionId || !requestCwd || res.status !== 403) throw new Error(data.error || `HTTP ${res.status}`);
         // A project can remain in the sidebar after its directory is moved or
         // deleted. Keep global agents usable while the API continues to reject
         // writes against that missing workspace.
@@ -115,13 +118,18 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       setWorkspaceCheckPending(false);
       setMessage(msg);
     } finally { if (isCurrent()) { setLoading(false); setSaving(false); setWorkspaceCheckPending(false); } }
-  }, [cwd, creating, t]);
-  useEffect(() => { void load(); }, [load]);
+  }, [cwd, sessionId, creating, t]);
+  useEffect(() => {
+    void load();
+    const refresh = () => { void load(); };
+    window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh);
+    return () => { loadGenerationRef.current += 1; window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh); };
+  }, [load]);
   useEffect(() => {
     setWorkspaceUnavailable(false);
     setWorkspaceCheckPending(Boolean(cwd));
     setSaving(false);
-  }, [cwd]);
+  }, [cwd, sessionId]);
   const canEditProject = Boolean(cwd && !workspaceUnavailable && !workspaceCheckPending);
   useEffect(() => { setCreateScope(canEditProject ? "project" : "user"); }, [canEditProject]);
   const counts = useMemo(() => {
@@ -163,14 +171,15 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
     if (agents[0]) { selectedRef.current = agents[0].name; setSelected(agents[0].name); fillForm(agents[0]); }
     else { selectedRef.current = null; clearForm(); setSelected(null); }
   };
+  const mutationParams = new URLSearchParams({ ...(cwd && !workspaceUnavailable ? { cwd } : {}), ...(sessionId ? { sessionId } : {}) });
   const unpack = async () => {
     const requestGeneration = loadGenerationRef.current;
     const requestCwd = cwd;
-    const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd;
+    const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd && sessionRef.current === sessionId;
     setSaving(true); setMessage(null);
     try {
       const scope: "user" | "project" = canEditProject ? "project" : "user";
-      const res = await fetch(`/api/agents?${new URLSearchParams(cwd && !workspaceUnavailable ? { cwd } : {})}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "unpack", scope, contextId }) });
+      const res = await fetch(`/api/agents?${mutationParams}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "unpack", scope, contextId }) });
       const data = (await res.json()) as { error?: string; total?: number; written?: number };
       if (!res.ok || data.error) {
         if (isCurrent() && res.status === 403 && scope === "project") setWorkspaceUnavailable(true);
@@ -190,12 +199,12 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
     if (!description.trim()) { setMessage(t("agentsConfig.descriptionRequired")); return; }
     const requestGeneration = loadGenerationRef.current;
     const requestCwd = cwd;
-    const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd;
+    const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd && sessionRef.current === sessionId;
     setSaving(true); setMessage(null);
     try {
       const scope = creating ? createScope : active?.template?.scope;
       if (!scope || (scope === "project" && !canEditProject)) throw new Error(t("agentsConfig.selectWorkspaceRequired"));
-      const params = new URLSearchParams(cwd && !workspaceUnavailable ? { cwd } : {});
+      const params = mutationParams;
       let original = active?.template;
       if (creating) {
         const prepare = await fetch(`/api/agents?${new URLSearchParams({ ...Object.fromEntries(params), scope, name: trimmedName })}`);
@@ -225,11 +234,11 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
     if (!active?.template || activeProjectUnavailable || conflict) return;
     const requestGeneration = loadGenerationRef.current;
     const requestCwd = cwd;
-    const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd;
+    const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd && sessionRef.current === sessionId;
     setSaving(true); setMessage(null);
     try {
       const original = active.template;
-      const res = await fetch(`/api/agents?${new URLSearchParams(cwd && !workspaceUnavailable ? { cwd } : {})}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextId: original.contextId, scope: original.scope, name: original.name, action: "delete", baseline: original.baseline, operations: [] }) });
+      const res = await fetch(`/api/agents?${mutationParams}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextId: original.contextId, scope: original.scope, name: original.name, action: "delete", baseline: original.baseline, operations: [] }) });
       const data = (await res.json()) as { error?: string };
       if (!res.ok || data.error) {
         if (res.status === 409 && isCurrent()) { setConflict(true); throw new Error(t("nativeSettings.conflict")); }

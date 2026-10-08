@@ -98,6 +98,18 @@ export async function readNativeAgentSettings(context: OmpConfigurationContext):
   return Object.fromEntries(["extensions", "enabledProviders", "disabledProviders", "task.disabledAgents"].map((key) => [key, entries[key]?.redacted ? undefined : entries[key]?.value]));
 }
 
+/** Server-only discovery capabilities; absent/unregistered values stay unknown. */
+export async function readNativeSkillSettings(context: OmpConfigurationContext): Promise<Record<string, unknown>> {
+  for (const scope of ["global", "project"] as const) assertSettingsTarget(context, scope, targetPath(context, scope));
+  for (const file of [targetPath(context, "global"), targetPath(context, "project"), ...context.view.launch.configFiles]) readDocument(file).toJS({ maxAliasCount: 100 });
+  const entries = await nativeEntries(context);
+  return Object.fromEntries([
+    "skills.enabled", "skills.enableCodexUser", "skills.enableClaudeUser", "skills.enableClaudeProject",
+    "skills.enablePiUser", "skills.enablePiProject", "skills.enableAgentsUser", "skills.enableAgentsProject",
+    "skills.customDirectories", "skills.ignoredSkills", "skills.includeSkills",
+  ].map((key) => [key, entries[key]?.redacted ? undefined : entries[key]?.value]));
+}
+
 /** A fresh native process is intentional: no utility/session cache or fabricated defaults. */
 export async function readNativeSettings(context: OmpConfigurationContext, scope: SettingsScope = "global", approvalKeys: string[] = [], roleKeys: string[] = []): Promise<NativeSettingsView> {
   for (const name of approvalKeys) if (!getNativeSettingDescriptor(`${APPROVAL_KEY_PREFIX}${name}`)) throw new Error("Invalid approval policy key");

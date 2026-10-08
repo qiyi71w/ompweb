@@ -164,6 +164,26 @@ grant for every extension tool. Tool, login and editor confirmations remain
 interactive; only your response answers a pending Web confirmation. Saved
 policy changes take effect in new sessions and do not stop an active session.
 
+**Extensions & Tools → Skills / Plugins** follows the selected session's
+trusted cwd, profile and environment, even if workspace launch defaults change.
+Skills distinguishes files installed on disk, native discovery and unknown
+active-session loading. A failed or unavailable native list is labeled as a
+nonauthoritative fallback; confirmed disabled sources stay excluded from that
+discovery. Installing into a disabled source does not enable or load it.
+
+Skill search uses skills.sh and installation uses `npx skills`, independently
+of native `skills.registryUrl`. Plugin and registry skills are visible without
+granting permission to edit their files. User-owned hide toggles preserve
+unrelated frontmatter and return a fresh view on conflicting edits; review it
+before retrying. Plugin operations use native `omp plugin`, refresh related
+skill/agent inventories, and do not automatically restart active sessions.
+
+Web speech transcription uses `OMP_WEB_STT_ENDPOINT`, `OMP_WEB_STT_KEY` and
+`OMP_WEB_STT_MODEL`; browser speech synthesis supplies TTS. Sound, layout and
+completion entry preferences are Web controls, separate from native terminal
+settings and the `spelling.autocomplete` engine. Web session auto-resume is
+also separate from native `autoResume`.
+
 **Agents** shows project templates before user templates, extension/npm-link
 plugins, marketplace plugins and bundled defaults, with source and shadowed
 paths. OMP 18.8.4 has no read-only complete agent-inventory command; the page
