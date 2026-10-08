@@ -3539,6 +3539,27 @@ test("a fresh chat hydrates and follows skill diagnostics after slash discovery 
   w.unmount();
 });
 
+test("an inherited fresh composer backfills the actual native model and thinking before stream attachment", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "native-defaults" } }),
+  });
+  world.agents.set("native-defaults", {
+    running: true,
+    state: { model: { provider: "fixture", id: "native", name: "Native", reasoning: true }, thinkingLevel: "low" },
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  assert.equal(w.latest.thinkingLevel, "inherit");
+  assert.equal(w.latest.allowThinkingInheritance, true);
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  assert.equal(w.latest.thinkingLevel, "low");
+  assert.equal(w.latest.displayModel.modelId, "native");
+  assert.equal(w.latest.allowThinkingInheritance, false);
+  assert.equal(lastEs().readyState, FakeEventSource.CONNECTING);
+  w.unmount();
+});
+
 test("a fresh chat runtime created after unmount cannot attach or apply skill diagnostics", async () => {
   resetWorld();
   let release;

@@ -782,12 +782,13 @@ function ModelDetail({
 
 // ── OAuth detail ──────────────────────────────────────────────────────────────
 
-function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefresh: () => void }) {
+function OAuthDetail({ provider, contextQuery, onRefresh }: { provider: OAuthProvider; contextQuery: string; onRefresh: () => void }) {
   const { t, tn } = useI18n();
   const [loginState, setLoginState] = useState<OAuthLoginState>({ phase: "idle" });
   const [inputValue, setInputValue] = useState("");
   const eventSourceRef = useRef<EventSource | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const loginUrl = `/api/auth/login/${encodeURIComponent(provider.id)}?${contextQuery}`;
 
   useEffect(() => {
     if (loginState.phase === "auth" || loginState.phase === "prompt") {
@@ -801,7 +802,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
     setInputValue("");
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
-  }, [provider.id]);
+  }, [provider.id, contextQuery]);
 
   useEffect(() => {
     return () => { eventSourceRef.current?.close(); };
@@ -812,7 +813,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
     setLoginState({ phase: "connecting" });
     setInputValue("");
 
-    const es = new EventSource(`/api/auth/login/${encodeURIComponent(provider.id)}`);
+    const es = new EventSource(loginUrl);
     eventSourceRef.current = es;
 
     es.onmessage = (e) => {
@@ -862,7 +863,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
       es.close();
       setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: t("modelsConfig.connectionLost") });
     };
-  }, [provider.id, onRefresh, t]);
+  }, [loginUrl, onRefresh, t]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -884,7 +885,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
     if (!code.trim()) return;
     setLoginState({ phase: "progress", message: t("modelsConfig.verifying") });
     try {
-      const res = await fetch(`/api/auth/login/${encodeURIComponent(provider.id)}`, {
+      const res = await fetch(loginUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token, code: code.trim() }),
@@ -899,12 +900,12 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
     } catch (e) {
       setLoginState({ phase: "error", message: e instanceof Error ? e.message : t("modelsConfig.networkError") });
     }
-  }, [provider.id, t]);
+  }, [loginUrl, t]);
 
   const submitSelection = useCallback(async (token: string, value: string) => {
     setLoginState({ phase: "progress", message: t("modelsConfig.continuing") });
     try {
-      const res = await fetch(`/api/auth/login/${encodeURIComponent(provider.id)}`, {
+      const res = await fetch(loginUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token, code: value }),
@@ -916,7 +917,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
     } catch (e) {
       setLoginState({ phase: "error", message: e instanceof Error ? e.message : t("modelsConfig.networkError") });
     }
-  }, [provider.id, t]);
+  }, [loginUrl, t]);
 
   const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
     loginState.phase === "auth" || loginState.phase === "device_code" ||
@@ -1075,6 +1076,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   if (cwd) params.set("cwd", cwd);
   if (sessionId) params.set("sessionId", sessionId);
   const modelsUrl = `/api/models-config?${params}`;
+  const contextQuery = params.toString();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1099,22 +1101,22 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   const [parseError, setParseError] = useState<{ message: string; path?: string } | null>(null);
 
   const loadOAuthProviders = useCallback(() => {
-    fetch("/api/auth/providers")
+    fetch(`/api/auth/providers?${contextQuery}`)
       .then((r) => r.json())
       .then((d: { providers?: OAuthProvider[] }) => {
         if (Array.isArray(d.providers)) setOauthProviders(d.providers);
       })
       .catch(() => {});
-  }, []);
+  }, [contextQuery]);
 
   const loadApiKeyProviders = useCallback(() => {
-    fetch("/api/auth/all-providers")
+    fetch(`/api/auth/all-providers?${contextQuery}`)
       .then((r) => r.json())
       .then((d: { providers?: ApiKeyProvider[] }) => {
         if (Array.isArray(d.providers)) setApiKeyProviders(d.providers);
       })
       .catch(() => {});
-  }, []);
+  }, [contextQuery]);
 
   const loadRuntimeModels = useCallback(async () => {
     setRuntimeModelsLoading(true);
@@ -1364,7 +1366,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
     if (selection.type === "oauth") {
       const p = oauthProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
-      return <OAuthDetail key={p.id} provider={p} onRefresh={() => { loadOAuthProviders(); loadApiKeyProviders(); void loadRuntimeModels(); }} />;
+      return <OAuthDetail key={`${p.id}:${contextQuery}`} provider={p} contextQuery={contextQuery} onRefresh={() => { loadOAuthProviders(); loadApiKeyProviders(); void loadRuntimeModels(); }} />;
     }
     if (selection.type === "apikey") {
       const p = apiKeyProviders.find((p) => p.id === selection.providerId);

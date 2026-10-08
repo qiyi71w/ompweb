@@ -41,7 +41,7 @@ export async function PUT(request: Request) {
       // Preserve the existing ambiguous bare-ID guard, without using a different
       // workspace/profile's shared utility or replacing a busy/login process.
       try {
-        const response = await runIsolatedUtilityCommand<{ models?: OmpModel[] }>({ type: "get_available_models" }, { cwd: context.view.cwd, env: Object.fromEntries(Object.entries(context.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), signal: request.signal });
+        const response = await runIsolatedUtilityCommand<{ models?: OmpModel[] }>(context, { type: "get_available_models" }, { signal: request.signal });
         if (Array.isArray(response.models)) assertNoAmbiguousModelScopes(enabled, response.models);
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("Ambiguous enabledModels entry")) throw error;

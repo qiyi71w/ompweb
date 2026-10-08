@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from "fs";
 import { join } from "path";
 import { getDiagnosticsDir } from "@/lib/omp/paths";
+import { resolveConfigurationContext } from "@/lib/omp/configuration-context";
 
 export async function register(): Promise<void> {
   // Honor HTTP(S)_PROXY/NO_PROXY for server-side fetch (update checks, skill
@@ -29,7 +30,7 @@ export async function register(): Promise<void> {
   void (async () => {
     try {
       const { runUtilityCommand } = await import("@/lib/omp/rpc-utility");
-      await runUtilityCommand({ type: "get_state" });
+      await runUtilityCommand(await resolveConfigurationContext(), { type: "get_state" });
       const { getOmpVersion } = await import("@/lib/omp/omp-cli");
       const version = await getOmpVersion();
       console.log(`[omp-web] omp utility ready (${version ?? "version unknown"})`);

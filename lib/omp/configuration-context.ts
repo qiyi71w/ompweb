@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { existsSync, realpathSync, statSync } from "fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { delimiter, dirname, join, relative, resolve } from "path";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isPathWithinRoots } from "../file-access";
@@ -16,6 +16,10 @@ export interface OmpConfigurationContext {
   view: ConfigurationContextView;
   env: NodeJS.ProcessEnv;
   queryArgs: string[];
+  /** Server-only spawn provenance; never serialize the environment or argv. */
+  launchArgs: string[];
+  processIdentity: string;
+  configurationRevision: string;
   unknownEffectiveKeys: Set<string>;
 }
 
@@ -51,6 +55,7 @@ export async function resolveConfigurationContext(request: ConfigurationContextR
   const unknownEffectiveKeys = new Set<string>();
   if (launch?.advisor) { sessionOnly.push("--advisor"); unknownEffectiveKeys.add("advisor.enabled"); }
   const args = (launch?.extraArgs ?? []).filter((arg) => !isReservedLaunchArg(arg));
+  const launchArgs: string[] = launch?.advisor ? ["--advisor"] : [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     const flag = arg.split("=", 1)[0];
@@ -59,7 +64,9 @@ export async function resolveConfigurationContext(request: ConfigurationContextR
       if (!value || value.startsWith("-")) throw new Error("Invalid OMP launch configuration");
       if (flag === "--profile") profile = normalizeProfile(value);
       else configFiles.push(resolve(cwd, value.startsWith("~/") ? join(homedir(), value.slice(2)) : value));
-    } else if (flag.startsWith("--")) {
+    } else {
+      launchArgs.push(arg);
+      if (!flag.startsWith("--")) continue;
       sessionOnly.push(flag);
       if (flag === "--thinking") unknownEffectiveKeys.add("defaultThinkingLevel");
       if (flag === "--advisor" || flag === "--no-advisor") unknownEffectiveKeys.add("advisor.enabled");
@@ -75,11 +82,29 @@ export async function resolveConfigurationContext(request: ConfigurationContextR
   const binary = resolveOmpBin();
   const version = binary ? await getOmpVersion() : null;
   const queryArgs = profile ? ["--profile", profile] : [];
+  launchArgs.unshift(...queryArgs);
   const identity = { binary, fingerprint: binary ? versionFingerprint(binary) : null, version, agentDir, cwd, profile, configFiles, args, advisor: launch?.advisor === true, environment: Object.entries(env).sort(([a], [b]) => a.localeCompare(b)), sessionId: request.sessionId ?? null };
   const id = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  const processIdentity = createHash("sha256").update(JSON.stringify({ ...identity, sessionId: undefined })).digest("hex");
+  const files = new Set([...configFiles, settingsPathIn(agentDir), join(agentDir, "models.yml"), join(agentDir, "models.yaml")]);
+  for (let directory = cwd; ; directory = dirname(directory)) {
+    files.add(join(directory, ".omp", "config.yml"));
+    files.add(join(directory, ".omp", "config.yaml"));
+    if (dirname(directory) === directory) break;
+  }
+  const revision = createHash("sha256").update(processIdentity);
+  for (const file of files) {
+    revision.update(file).update("\0");
+    try { revision.update(readFileSync(file)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Configuration file is unavailable");
+      revision.update("missing");
+    }
+    revision.update("\0");
+  }
   return {
     view: { id, binary, version, agentDir, cwd, profile: profile ?? null, environmentNames: Object.keys(getAgentEnvOverrides()).sort(), launch: { configFiles, sessionOnly }, sessionId: request.sessionId ?? null, sessionValues: "unknown" },
-    env, queryArgs, unknownEffectiveKeys,
+    env, queryArgs, unknownEffectiveKeys, launchArgs, processIdentity, configurationRevision: revision.digest("hex"),
   };
 }
 

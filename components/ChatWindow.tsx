@@ -529,6 +529,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
+    allowThinkingInheritance,
     externalRunActive,
     toolPreset,
     liveModelMeta,
@@ -1069,6 +1070,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       isCompacting={isCompacting}
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
+      allowThinkingInheritance={allowThinkingInheritance}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       toolPreset={toolPreset}
       onToolPresetChange={handleToolPresetChange}

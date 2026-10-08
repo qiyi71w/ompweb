@@ -3,7 +3,6 @@ import { existsSync, readFileSync } from "fs";
 import { isDeepStrictEqual } from "util";
 import { basename, join } from "path";
 import { isMap, parseDocument, type Document } from "yaml";
-import { getSettingsPath } from "./paths";
 import { isRecord } from "../type-guards";
 import { isCompactionMethodOrder } from "../compaction-methods";
 import { assertSettingsTarget, settingsPathIn, type OmpConfigurationContext } from "./configuration-context";
@@ -22,13 +21,6 @@ function readDocument(path: string): Document {
   return doc;
 }
 
-/** Narrow persisted accessors for existing runtime consumers; no effective-value claims. */
-export function readAnthropicSlowMode(): boolean {
-  try {
-    const doc = readDocument(getSettingsPath());
-    return (doc.getIn(["providers", "anthropic", "slowMode"]) ?? doc.get("providers.anthropic.slowMode")) === "auto";
-  } catch { return false; }
-}
 
 function targetPath(context: OmpConfigurationContext, scope: SettingsScope): string {
   return settingsPathIn(scope === "global" ? context.view.agentDir : join(context.view.cwd, ".omp"));

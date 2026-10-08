@@ -178,6 +178,7 @@ interface Props {
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: string;
+  allowThinkingInheritance?: boolean;
   onThinkingLevelChange?: (level: string) => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
@@ -320,7 +321,7 @@ function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): Reac
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, usageLimit, fastModeSupported, onFastModeChange, slowModeSupported, slowModeEnabled, slowModeScope, onSlowModeChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
+  thinkingLevel, allowThinkingInheritance, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   toolPreset, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -1732,12 +1733,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     : t("chatInput.compactContext");
   const thinkingDisplayLabel = (() => {
     const lvl = thinkingLevel ?? "auto";
+    if (lvl === "inherit") return t("chatInput.inheritThinking");
     if (lvl === "auto" || !thinkingLevelMap) return lvl;
     return thinkingLevelMap[lvl] ?? lvl;
   })();
   const thinkingLevelOptions = React.useMemo(
-    () => selectableThinkingLevels(availableThinkingLevels),
-    [availableThinkingLevels],
+    () => [...(allowThinkingInheritance ? ["inherit"] : []), ...selectableThinkingLevels(availableThinkingLevels)],
+    [availableThinkingLevels, allowThinkingInheritance],
   );
   // A run starting mid-interaction must not leave the reasoning menu
   // open: the level only applies to the next prompt, and the trigger is
@@ -3075,7 +3077,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       {thinkingLevelOptions.map((lvl) => {
                         const isActive = (thinkingLevel ?? "auto") === lvl;
                         const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
-                        const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
+                        const displayLabel = lvl === "inherit" ? t("chatInput.inheritThinking") : (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
                         return (
                           <button
                             className="picker-row picker-thinking-card"

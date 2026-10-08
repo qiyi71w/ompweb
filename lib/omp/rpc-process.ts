@@ -60,6 +60,9 @@ interface PendingCommand {
 export interface RpcProcessOptions {
   /** Working directory for the agent (also passed as --cwd). */
   cwd: string;
+  /** Already-resolved trusted server context binary and complete environment. */
+  binary?: string | null;
+  environment?: NodeJS.ProcessEnv;
   /** Extra CLI args appended after the base `--mode rpc-ui --cwd <cwd>`. */
   extraArgs?: string[];
   /** Environment overrides merged over process.env. */
@@ -96,7 +99,7 @@ export class RpcProcess {
   constructor(options: RpcProcessOptions) {
     const resolveBin = options.dependencies?.resolveOmpBin ?? resolveOmpBin;
     this.spawnProcess = options.dependencies?.spawn ?? spawn;
-    const bin = resolveBin();
+    const bin = options.binary === undefined ? resolveBin() : options.binary;
     if (!bin) {
       throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
     }
@@ -104,12 +107,7 @@ export class RpcProcess {
     if (options.onFrame) this.frameListeners.add(options.onFrame);
 
     const args = ["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])];
-    // omp-web ignores named profiles (OMP_PROFILE/PI_PROFILE): strip them so the
-    // child resolves the same default agent dir. An explicit options.env entry
-    // still wins (used to force the default profile for isolated test runs).
-    const childEnv = sanitizeProjectCommandEnvironment({ ...process.env, ...options.env });
-    if (options.env?.OMP_PROFILE === undefined) delete childEnv.OMP_PROFILE;
-    if (options.env?.PI_PROFILE === undefined) delete childEnv.PI_PROFILE;
+    const childEnv = sanitizeProjectCommandEnvironment(options.environment ?? { ...process.env, ...options.env });
     const target = wrapWindowsScript(bin, args);
     this.child = this.spawnProcess(target.file, target.args, {
       cwd: options.cwd,

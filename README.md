@@ -107,6 +107,19 @@ registry resolution, using preserved credentials server-side; it sends no prompt
 Both `models.yml` and its `models.yaml` fallback are blocked from generic file
 reads and downloads under the OMP configuration roots.
 
+New sessions inherit the selected workspace's native model and thinking defaults.
+The model shown before startup is a candidate, not an override; choosing a model
+or a thinking level explicitly applies it only to that session. **Inherit native
+default** differs from **Auto**: Auto asks OMP to choose effort, and the composer
+shows the resolved native level after startup. Neither choice saves a future default.
+
+Model and authentication queries use the same trusted workspace/profile launch
+context as session startup. External settings, model files and Web agent environment
+edits are picked up on the next applicable query or new process, without a watcher.
+Utility replacement waits for active commands; an ongoing login keeps its original
+context. Saving configuration does not stop an active session. Existing sessions
+retain their spawn environment until restarted.
+
 Signing in authenticates the provider but does not alter native model filters.
 An authenticated, disabled provider remains visibly disabled under **Composer
 model picker**. Its **Enable in OMP** action edits the saved disabled-provider
@@ -321,7 +334,7 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 - **Session Management**: Browse past conversations by project, fork sessions, branch within a session, archive/restore, import session files, and deep-link via URL.
 - **Draft Recovery**: Unsent text stays scoped to its conversation or new-session workspace and is restored after Back/Forward navigation or reload in the same tab when browser storage is available (up to 50 drafts). Images and file attachments remain in memory only.
 - **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
-- **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
+- **Tool Preset Picker**: A browser-local preference for new sessions: `none` disables tools; `default` selects `read,bash,edit,write`; `full` inherits the native toolset without adding a limiting list. Stored in localStorage, not native defaults; changing it does not replace a running session's tools.
 - **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access.
 - **Git Worktree Support**: Create, switch, and manage Git worktrees directly from the sidebar; sessions and file roots stay grouped by project.
 - **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.

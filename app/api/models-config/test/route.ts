@@ -70,18 +70,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Invalid model configuration" });
     }
 
-    // Isolated throwaway agent dir: the spawned omp sees only this candidate
-    // config (no stored credentials, no models.db cache) and never touches
-    // ~/.omp. Profile/XDG overrides are cleared so the redirect always wins
-    // (the omp child still honors profiles even though omp-web ignores them).
+    // Server-created candidate registry: exclude saved credentials and user
+    // launch overlays, retaining the trusted installed binary/environment.
     tempDir = mkdtempSync(join(tmpdir(), "omp-web-model-test-"));
     writeFileSync(join(tempDir, "models.yml"), serializeModelsConfig(config), "utf8");
 
     const startedAt = Date.now();
     const { models } = await runIsolatedUtilityCommand<{ models: OmpModel[] }>(
+      {
+        ...context,
+        view: { ...context.view, agentDir: tempDir, profile: null },
+        launchArgs: [],
+        queryArgs: [],
+        env: { ...context.env, PI_CODING_AGENT_DIR: tempDir, OMP_PROFILE: "", PI_PROFILE: "", PI_CONFIG_FILES: "", XDG_DATA_HOME: "" },
+      },
       { type: "get_available_models" },
       {
-        env: { PI_CODING_AGENT_DIR: tempDir, OMP_PROFILE: "", PI_PROFILE: "", XDG_DATA_HOME: "" },
         timeoutMs: TEST_TIMEOUT_MS,
         signal: req.signal,
       },

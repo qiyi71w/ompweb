@@ -1,4 +1,5 @@
-import { readModelsConfig } from "@/lib/omp/models-config";
+import { readModelsConfiguration } from "@/lib/omp/models-config";
+import { resolveConfigurationContext } from "@/lib/omp/configuration-context";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 
 export const dynamic = "force-dynamic";
@@ -9,9 +10,12 @@ export const dynamic = "force-dynamic";
 // via get_available_models — so this endpoint lists configured providers only.
 // Unconfigured API-key providers cannot be set up from the web UI (see the
 // api-key route), so they are intentionally absent.
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const url = new URL(request.url);
+    const context = await resolveConfigurationContext({ cwd: url.searchParams.get("cwd"), sessionId: url.searchParams.get("sessionId") });
     const modelsResponse = await runUtilityCommand<{ models?: unknown }>(
+      context,
       { type: "get_available_models" },
       120_000,
     );
@@ -22,6 +26,7 @@ export async function GET() {
       ))
       : [];
     const loginResponse = await runUtilityCommand<{ providers?: unknown }>(
+      context,
       { type: "get_login_providers" },
       30_000,
     );
@@ -38,7 +43,7 @@ export async function GET() {
     // custom models.yml providers are managed in the editor tree.
     const oauthAuthenticated = new Set(loginProviders.filter((p) => p.authenticated).map((p) => p.id));
     const loginNames = new Map(loginProviders.map((p) => [p.id, p.name]));
-    const customProviders = new Set(Object.keys(readModelsConfig().providers ?? {}));
+    const customProviders = new Set(Object.keys(readModelsConfiguration(context).config.providers ?? {}));
 
     const counts = new Map<string, number>();
     for (const model of models) {

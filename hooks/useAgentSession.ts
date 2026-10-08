@@ -229,7 +229,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // to avoid a server/client mismatch when the user stored a different preset.
   const [toolPreset, setToolPreset] = useState<ToolPreset>("full");
   useEffect(() => { setToolPreset(getPreferredToolPreset()); }, []);
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>(isNew ? "inherit" : "auto");
+  const [newSessionThinkingChoice, setNewSessionThinkingChoice] = useState<string | null>(null);
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
   // `/slow` for the active model, as omp reports it: false whenever the model
@@ -519,7 +520,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const displayModel = useMemo(
     () =>
       isNew
-        ? (newSessionModel ?? newSessionDefaultModel)
+        ? (liveModelMeta ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId } : newSessionModel ?? newSessionDefaultModel)
         : (currentModelOverride ?? (liveModelMeta
             ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId }
             : data?.context.model ?? pendingModel)),
@@ -984,7 +985,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
 
     const promise = (async () => {
-      const selectedModel = newSessionModel ?? newSessionDefaultModel;
+      const selectedModel = newSessionModel;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
       const res = await fetch("/api/agent/new", {
@@ -995,7 +996,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "ensure_session",
           toolNames,
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+          ...(newSessionThinkingChoice !== null ? { thinkingLevel: newSessionThinkingChoice } : {}),
           ...(advisorEnabled ? { advisor: true } : {}),
         }),
       });
@@ -1003,6 +1004,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const result = await res.json() as { sessionId: string };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
+      await refreshLiveModelState(realId);
       // The toggle handler could not persist while the chat had no id; carry
       // the pre-prompt choice over so it survives a reload after this point.
       if (advisorEnabled) {
@@ -1027,7 +1029,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, toolPreset, newSessionThinkingChoice, refreshLiveModelState]);
 
   // The system panel may initialize a dormant session, but must not create a
   // prompt or model run just to inspect the resolved system prompt.
@@ -3316,7 +3318,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const match = d.defaultModel
           ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
           : undefined;
-        const displayModel = match ?? nextModelList[0];
+        const displayModel = match;
         setNewSessionDefaultModel(displayModel ? { provider: displayModel.provider, modelId: displayModel.id } : null);
       }
     } catch (e) {
@@ -3588,12 +3590,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     authoritativeModelSeqRef.current += 1;
+    if (!sessionIdRef.current && !ensuringNewSessionRef.current) {
+      setNewSessionThinkingChoice(level === "inherit" ? null : level);
+      setThinkingLevel(level);
+      return;
+    }
     setThinkingLevel(level);
-    if (level === "auto") return; // "auto" leaves pi's current setting untouched
     modelCommandPendingRef.current += 1;
     try {
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
       if (!sid) return;
+      if (level === "inherit") {
+        await refreshLiveModelState(sid);
+        return;
+      }
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
       await refreshLiveModelState(sid);
     } catch (e) {
@@ -3901,6 +3911,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // State
     data, loading, error, activeLeafId, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
+    allowThinkingInheritance: isNew && !sessionIdRef.current,
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, skillDiagnostics, forkingEntryId,
     isCompacting, compactError, compactResult, tokensPerSecond, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,
