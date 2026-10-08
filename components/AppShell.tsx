@@ -1240,7 +1240,7 @@ export function AppShell({ appName }: { appName: string }) {
   // list itself could not be fetched (keep the entry, abort this navigation).
   const fetchSessionForNavigation = useCallback(async (sessionId: string): Promise<SessionInfo | null | "unavailable"> => {
     try {
-      const res = await fetch("/api/sessions");
+      const res = await fetch(`/api/sessions?sessionId=${encodeURIComponent(sessionId)}`);
       if (!res.ok) return "unavailable";
       const data = (await res.json()) as { sessions?: SessionInfo[] };
       return data.sessions?.find((s) => s.id === sessionId) ?? null;
@@ -1316,7 +1316,7 @@ export function AppShell({ appName }: { appName: string }) {
   // handleCwdChange relies on. Hydrate it from the session list so switching
   // worktrees right after creating a session doesn't close the chat.
   const hydrateSelectedSession = useCallback((sessionId: string) => {
-    void fetch("/api/sessions")
+    void fetch(`/api/sessions?sessionId=${encodeURIComponent(sessionId)}`)
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
@@ -1455,7 +1455,7 @@ export function AppShell({ appName }: { appName: string }) {
     const selectRestoredSession = async (attemptsLeft = 5): Promise<void> => {
       if (activeSessionIdRef.current !== sessionAtRestoreStart) return;
       try {
-        const res = await fetch("/api/sessions");
+        const res = await fetch(`/api/sessions?sessionId=${encodeURIComponent(sessionId)}`);
         if (res.ok) {
           const data = (await res.json()) as { sessions?: SessionInfo[] };
           const found = data.sessions?.find((s) => s.id === sessionId);
@@ -1758,7 +1758,7 @@ export function AppShell({ appName }: { appName: string }) {
       optimisticSession={selectedSession?.path === "" ? selectedSession : null}
       onSelectSession={handleSelectSession}
       onNewSession={handleNewSession}
-      initialSessionId={initialSessionId}
+      initialSessionId={initialSessionRestored ? null : initialSessionId}
       skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
       onInitialRestoreDone={handleInitialRestoreDone}
       refreshKey={refreshKey}
@@ -1809,6 +1809,8 @@ export function AppShell({ appName }: { appName: string }) {
         }}
       />
       <CommandPaletteMount
+        sessionId={selectedSession?.id}
+        cwd={selectedSession?.cwd || newSessionCwd}
         onSelectSession={handleSelectSession}
         onNewSession={() => {
           // An empty cwd is truthy, so showChat would render the shell while
@@ -2542,6 +2544,8 @@ export function AppShell({ appName }: { appName: string }) {
     <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (
       <ArchiveBrowser
+        sessionId={selectedSession?.id}
+        cwd={selectedSession?.cwd || newSessionCwd}
         open={archiveBrowserOpen}
         onClose={() => setArchiveBrowserOpen(false)}
         onRestored={handleArchiveRestored}

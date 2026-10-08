@@ -12,6 +12,8 @@ type Props = {
   onSelectSession: (session: SessionInfo) => void;
   onNewSession: () => void;
   currentModel?: string | null;
+  sessionId?: string | null;
+  cwd?: string | null;
   initialOpen?: boolean;
   openRequest?: number;
 };
@@ -26,7 +28,7 @@ function relativeTime(value: string, locale: string): string {
   return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(-Math.floor(hours / 24), "day");
 }
 
-export const CommandPalette = memo(function CommandPalette({ onSelectSession, onNewSession, currentModel, initialOpen = false, openRequest = 0 }: Props) {
+export const CommandPalette = memo(function CommandPalette({ onSelectSession, onNewSession, currentModel, sessionId, cwd, initialOpen = false, openRequest = 0 }: Props) {
   const { t, locale } = useI18n();
   const { isDark, toggleTheme, setTheme, preference } = useTheme();
   const [open, setOpen] = useState(initialOpen);
@@ -43,7 +45,10 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
     // #1 clobber #2 or drop the spinner early.
     const seq = ++loadSeqRef.current;
     setLoading(true);
-    void fetch("/api/sessions")
+    const params = new URLSearchParams();
+    if (sessionId) params.set("sessionId", sessionId);
+    else if (cwd) params.set("cwd", cwd);
+    void fetch(`/api/sessions?${params}`)
       .then((response) => response.ok ? response.json() as Promise<{ sessions?: SessionInfo[] }> : Promise.reject(new Error("request failed")))
       .then((data) => {
         if (seq !== loadSeqRef.current) return;
@@ -57,7 +62,7 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
         if (seq !== loadSeqRef.current) return;
         setLoading(false);
       });
-  }, []);
+  }, [sessionId, cwd]);
 
 
   useEffect(() => {

@@ -165,7 +165,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if (showLoading) setLoading(true);
       const headers: Record<string, string> = {};
       if (sessionsEtagRef.current) headers["If-None-Match"] = sessionsEtagRef.current;
-      const res = await fetch("/api/sessions", { headers, signal: controller.signal });
+      const params = new URLSearchParams();
+      const reference = selectedSessionId || initialSessionId;
+      if (reference) params.set("sessionId", reference);
+      else if (selectedCwdProp || selectedCwd) params.set("cwd", (selectedCwdProp || selectedCwd)!);
+      const res = await fetch(`/api/sessions?${params}`, { headers, signal: controller.signal });
       if (res.status === 304) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const etag = res.headers.get("ETag");
@@ -210,7 +214,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       initialLoadedRef.current = true;
       if (showLoading) setLoading(false);
     }
-  }, [t]);
+  }, [t, selectedSessionId, initialSessionId, selectedCwdProp, selectedCwd]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -277,7 +281,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
     // sidebar never has to poll while an agent is working.
-    const source = new EventSource("/api/agent/running/events");
+    const params = new URLSearchParams();
+    const reference = selectedSessionId || initialSessionId;
+    if (reference) params.set("sessionId", reference);
+    else if (selectedCwdProp || selectedCwd) params.set("cwd", (selectedCwdProp || selectedCwd)!);
+    const source = new EventSource(`/api/agent/running/events?${params}`);
 
     source.onmessage = (e) => {
       try {
@@ -323,7 +331,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if (pendingRefreshRef.current) clearTimeout(pendingRefreshRef.current);
       source.close();
     };
-  }, [loadSessions, scheduleRefresh]);
+  }, [loadSessions, scheduleRefresh, selectedSessionId, initialSessionId, selectedCwdProp, selectedCwd]);
   // Long-idle recovery: while the tab is hidden the SSE connection can die
   // (laptop sleep, network change, tab freeze) and its EventSource reconnect
   // carries no list invalidation. Refresh whenever the user actually comes
@@ -1060,7 +1068,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     setImporting(true);
     try {
       const content = await file.text();
-      const res = await fetch("/api/sessions/import", {
+      const params = new URLSearchParams();
+      if (selectedSessionId) params.set("sessionId", selectedSessionId);
+      else if (selectedCwd) params.set("cwd", selectedCwd);
+      const res = await fetch(`/api/sessions/import?${params}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fileName: file.name, content }),
@@ -1078,7 +1089,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     } finally {
       setImporting(false);
     }
-  }, [importing, loadSessions, loadProjects, t]);
+  }, [importing, loadSessions, loadProjects, t, selectedSessionId, selectedCwd]);
 
   // Sessions of every worktree in the selected project are shown together.
   // Keys are comparableProjectPath forms (see expandProject) — comparable to

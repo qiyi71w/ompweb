@@ -3,15 +3,20 @@ import { apiErrorResponse } from "@/lib/api-utils";
 import { listArchivedSessions, restoreArchivedSession } from "@/lib/omp/archive";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import type { ArchivedSessionInfo } from "@/lib/types";
+import { basename, dirname, join } from "path";
+import { resolveBrowsingSessionRoot } from "@/lib/omp/configuration-context";
+import { qualifySessionId } from "@/lib/session-reference";
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const archives = await listArchivedSessions();
+    const params = new URL(req.url).searchParams;
+    const root = await resolveBrowsingSessionRoot({ cwd: params.get("cwd"), sessionId: params.get("sessionId") });
+    const archives = await listArchivedSessions(join(dirname(root.sessionsDir), "archive", basename(root.sessionsDir)));
     const response: ArchivedSessionInfo[] = archives.map((archive) => ({
       key: archive.key,
-      id: archive.id,
+      id: qualifySessionId(root, archive.id),
       cwd: archive.cwd,
       ...(archive.title ? { name: archive.title } : {}),
       created: archive.created.toISOString(),
@@ -33,7 +38,9 @@ export async function POST(req: Request) {
     if (typeof body.key !== "string" || !body.key.trim()) {
       return NextResponse.json({ error: "Archive key is required", code: "archive_key_required" }, { status: 400 });
     }
-    const sessionId = restoreArchivedSession(body.key);
+    const params = new URL(req.url).searchParams;
+    const root = await resolveBrowsingSessionRoot({ cwd: params.get("cwd"), sessionId: params.get("sessionId") });
+    const sessionId = qualifySessionId(root, restoreArchivedSession(body.key, root.sessionsDir, join(dirname(root.sessionsDir), "archive", basename(root.sessionsDir))));
     invalidateSessionListCache();
     return NextResponse.json({ ok: true, sessionId });
   } catch (error) {

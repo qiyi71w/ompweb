@@ -5,7 +5,8 @@ import { tmpdir } from "os";
 import { basename, join } from "path";
 import { promisify } from "util";
 import { NextResponse } from "next/server";
-import { resolveOmpBin } from "@/lib/omp/omp-cli";
+import { resolveConfigurationContext } from "@/lib/omp/configuration-context";
+import type { OmpConfigurationContext } from "@/lib/omp/configuration-context";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getContentDisposition } from "@/lib/content-disposition";
 
@@ -18,13 +19,14 @@ export const runtime = "nodejs";
  * binary: `omp --export <sessionPath> <outPath>` (the output path is the first
  * positional argument; verified against oh-my-pi main.ts/flag-tables.ts).
  */
-async function exportSession(filePath: string, outputPath: string): Promise<void> {
-  const bin = resolveOmpBin();
+async function exportSession(filePath: string, outputPath: string, context: OmpConfigurationContext): Promise<void> {
+  const bin = context.view.binary;
   if (!bin) {
     throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
   }
-  await execFileAsync(bin, ["--export", filePath, outputPath], {
-    cwd: tmpdir(),
+  await execFileAsync(bin, [...context.queryArgs, "--export", filePath, outputPath], {
+    cwd: context.view.cwd,
+    env: context.env,
     timeout: 60_000,
     maxBuffer: 4 * 1024 * 1024,
     windowsHide: true,
@@ -51,7 +53,7 @@ export async function GET(
     const outputPath = join(tempDir, `${randomUUID()}.html`);
 
     try {
-      await exportSession(filePath, outputPath);
+      await exportSession(filePath, outputPath, await resolveConfigurationContext({ sessionId: id }));
 
       const html = readFileSync(outputPath, "utf8");
       return new Response(html, {

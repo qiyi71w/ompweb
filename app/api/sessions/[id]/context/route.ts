@@ -5,6 +5,7 @@ import { buildSessionContext, getSessionContextBoundary, getSessionEntriesForDis
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionSyncResponse } from "@/lib/session-sync";
+import { sessionRoot } from "@/lib/session-reference";
 
 /** Uniform error mapping for this route: the display read throws
  * SessionFileTooLargeError on files past the load ceiling, which must surface
@@ -104,6 +105,7 @@ export async function GET(
         deferThinking,
         deferToolResultImages,
         includePreCompaction,
+        blobsDir: sessionRoot(id).blobsDir,
       });
       // Sample AFTER the disk read: a quiet active run still supplies its most
       // recent partial output, and events arriving during the read win.
@@ -115,7 +117,7 @@ export async function GET(
       return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
     }
     // Deduplicated cached read; blob resolution on per-entry deep copies.
-    const entries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
+    const entries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages, blobsDir: sessionRoot(id).blobsDir });
     const context = buildSessionContext(entries, leafId, {
       deferThinking,
       deferToolResultImages,

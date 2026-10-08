@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listAllSessions } from "@/lib/session-reader";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
+import { resolveBrowsingSessionRoot } from "@/lib/omp/configuration-context";
+import { sessionRoot } from "@/lib/session-reference";
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -15,8 +17,10 @@ const SESSION_LIST_HEADERS = {
 
 export async function GET(req: Request) {
   try {
-    const sessions = await listAllSessions();
-    const runningSessions = getRunningRpcSessions();
+    const params = new URL(req.url).searchParams;
+    const root = await resolveBrowsingSessionRoot({ cwd: params.get("cwd"), sessionId: params.get("sessionId") });
+    const sessions = await listAllSessions(root);
+    const runningSessions = getRunningRpcSessions().filter(s => sessionRoot(s.id).token === root.token);
     const runningSessionIds = runningSessions.map((s) => s.id);
     const body = { sessions, runningSessionIds, runningSessions };
     const bodyJson = JSON.stringify(body);

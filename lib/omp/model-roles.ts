@@ -10,11 +10,12 @@ export async function readModelRoles(context: OmpConfigurationContext, scope?: S
   return { ...view, roles };
 }
 
+/** Native catalog configuration, not a reconstruction of a session's prior overrides. */
 export async function readDisabledProviders(context?: OmpConfigurationContext): Promise<Set<string>> {
   const view = await readNativeSettings(context ?? await resolveConfigurationContext());
   const field = view.fields.disabledProviders;
-  const value = field?.effective.value;
-  if (!field?.effective.known || !Array.isArray(value) || !value.every((entry) => typeof entry === "string")) throw new Error("Native provider filter status is unavailable");
+  const value = field?.native.value;
+  if (!field?.native.known || !Array.isArray(value) || !value.every((entry) => typeof entry === "string")) throw new Error("Native provider filter status is unavailable");
   return new Set(value);
 }
 

@@ -29,6 +29,7 @@ import type {
 } from "./pi-types";
 import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
+import { nativeSessionId, qualifySessionId, sessionFileBelongsToRoot } from "./session-reference";
 
 // ============================================================================
 // Types
@@ -541,7 +542,10 @@ export class AgentSessionWrapper {
 
   private applyIdentity(state: RpcSessionState): void {
     const oldId = this._sessionId;
-    const identityChanged = Boolean(oldId) && (state.sessionId !== oldId || (state.sessionFile && state.sessionFile !== this._sessionFile));
+    const root = this._configurationContext?.sessionRoot;
+    if (root && state.sessionFile && !sessionFileBelongsToRoot(state.sessionFile, root)) throw new Error("Native session is outside its configuration root");
+    const reference = root ? qualifySessionId(root, state.sessionId) : state.sessionId;
+    const identityChanged = Boolean(oldId) && (reference !== oldId || (state.sessionFile && state.sessionFile !== this._sessionFile));
     // omp >= 18.5 moves a session it does not own onto a new file on its first
     // write (`session-persistence` notice). The conversation continues, so the
     // live stream and run state must survive; only the id changes.
@@ -553,7 +557,7 @@ export class AgentSessionWrapper {
       this.awaitingAgentStartDeadline = 0;
       this.continuationGraceUntil = 0;
     }
-    this._sessionId = state.sessionId;
+    this._sessionId = reference;
     this._sessionFile = state.sessionFile ?? "";
     this._sessionName = state.sessionName;
     this.streaming = state.isStreaming;
@@ -977,6 +981,9 @@ export class AgentSessionWrapper {
     // `web` belongs to this wrapper, never to native/extension-supplied frames.
     // Strip it before caching tool snapshots as well as before wire emission.
     delete event.web;
+    if (typeof event.sessionId === "string" && this._configurationContext) {
+      event.sessionId = qualifySessionId(this._configurationContext.sessionRoot, event.sessionId);
+    }
     switch (event.type) {
       case "agent_start":
         this.responseObserved = false;
@@ -1262,7 +1269,7 @@ export class AgentSessionWrapper {
     }
     const skillDiagnostics = parseSkillDiagnosticsSnapshot(state.skillDiagnostics);
     return {
-      sessionId: state.sessionId,
+      sessionId: this._sessionId,
       sessionFile: state.sessionFile ?? "",
       sessionName: state.sessionName,
       isStreaming: state.isStreaming,
@@ -1774,6 +1781,9 @@ export class AgentSessionWrapper {
             type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : undefined,
           );
           if (type === "set_thinking_level") this.invalidateSessionLists();
+          if (type === "get_messages_page" && isRecord(result) && typeof result.sessionId === "string" && this._configurationContext) {
+            return { ...result, sessionId: qualifySessionId(this._configurationContext.sessionRoot, result.sessionId) };
+          }
           return result ?? null;
         }
         throw new Error(`Unsupported command: ${type}`);
@@ -2043,6 +2053,9 @@ export async function startRpcSession(
   const registry = getRegistry();
   const locks = getLocks();
   const context = await resolveConfigurationContext({ cwd, sessionId: sessionFile ? sessionId : undefined });
+  const root = context.sessionRoot;
+  sessionId = qualifySessionId(root, nativeSessionId(sessionId));
+  if (sessionFile && !sessionFileBelongsToRoot(sessionFile, root)) throw new Error("Session file does not belong to the requested root");
   const effectiveAdvisor = advisor === true || context.launchArgs.includes("--advisor");
 
   const existing = registry.get(sessionId);
@@ -2068,7 +2081,7 @@ export async function startRpcSession(
   // live wrapper that already reports this file (e.g. after it moved files).
   if (sessionFile && !existing) {
     for (const candidate of new Set(registry.values())) {
-      if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
+      if (candidate.isAlive() && candidate.configurationContext.sessionRoot.token === root.token && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
         registry.set(sessionId, candidate);
         return { session: candidate, realSessionId: candidate.sessionId };
       }

@@ -30,6 +30,8 @@ import type { TodoPhase } from "./pi-types";
 import { projectIdentityKey, sessionPathKey } from "./paths";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { selectHistoryRange, type SessionHistoryCursor, type SessionHistoryPage } from "./session-sync";
+import { blobsForSessionFile, qualifySessionId, rootForSessionFile, sessionRoot, sessionFileBelongsToRoot } from "./session-reference";
+import type { SessionRoot } from "./session-reference";
 
 export { getAgentDir };
 
@@ -50,8 +52,10 @@ function matchParentSessionId(
   return knownIds.has(parentSession) ? parentSession : undefined;
 }
 
-async function loadAllSessions(): Promise<SessionInfo[]> {
-  const ompSessions: OmpSessionInfo[] = await listAllSessionInfos();
+async function loadAllSessions(root: SessionRoot): Promise<SessionInfo[]> {
+  const ompSessions: OmpSessionInfo[] = (await listAllSessionInfos(root.sessionsDir))
+    .filter(s => sessionFileBelongsToRoot(s.path, root))
+    .map(s => ({ ...s, id: qualifySessionId(root, s.id), parentSessionPath: s.parentSessionPath && !/[\\/]/.test(s.parentSessionPath) ? qualifySessionId(root, s.parentSessionPath) : s.parentSessionPath }));
   const pathToId = new Map<string, string>();
   const knownIds = new Set<string>();
   for (const s of ompSessions) {
@@ -97,29 +101,29 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
   });
 }
 
-export async function listAllSessions(): Promise<SessionInfo[]> {
+export async function listAllSessions(root: SessionRoot = sessionRoot()): Promise<SessionInfo[]> {
   const generation = globalThis.__piSessionListGeneration ?? 0;
 
   // Return cached result if still fresh (avoids re-scanning session files
   // and re-spawning git processes on every page load).
-  if (globalThis.__piSessionListCache && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
+  if (globalThis.__piSessionListCache?.root === root.sessionsDir && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
     return globalThis.__piSessionListCache.data;
   }
 
   // Coalescing dedup: concurrent callers share the same in-flight promise
   // only while it belongs to the current cache generation.
-  if (globalThis.__piSessionListPromise && globalThis.__piSessionListPromiseGeneration === generation) {
+  if (globalThis.__piSessionListPromise && globalThis.__piSessionListPromiseRoot === root.sessionsDir && globalThis.__piSessionListPromiseGeneration === generation) {
     return globalThis.__piSessionListPromise;
   }
 
   // Flipped once the watchdog below retires this scan: a hung load that
   // resolves after the slot moved on must not overwrite fresher cache data.
   let retired = false;
-  const loadPromise = loadAllSessions().then((data) => {
+  const loadPromise = loadAllSessions(root).then((data) => {
     // An invalidation may happen while the scan is in flight. Do not let that
     // older result repopulate the cache after a session mutation.
     if ((globalThis.__piSessionListGeneration ?? 0) === generation && !retired) {
-      globalThis.__piSessionListCache = { data, ts: Date.now() };
+      globalThis.__piSessionListCache = { data, ts: Date.now(), root: root.sessionsDir };
     }
     return data;
   });
@@ -145,10 +149,7 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
 
   globalThis.__piSessionListPromise = trackedPromise;
   globalThis.__piSessionListPromiseGeneration = generation;
-  watchdog.unref?.();
-
-  globalThis.__piSessionListPromise = trackedPromise;
-  globalThis.__piSessionListPromiseGeneration = generation;
+  globalThis.__piSessionListPromiseRoot = root.sessionsDir;
   return trackedPromise;
 }
 
@@ -160,8 +161,9 @@ declare global {
   var __piPathToSessionIdCache: Map<string, string> | undefined;
   var __piSessionListPromise: Promise<SessionInfo[]> | undefined;
   var __piSessionListPromiseGeneration: number | undefined;
+  var __piSessionListPromiseRoot: string | undefined;
   var __piSessionListGeneration: number | undefined;
-  var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
+  var __piSessionListCache: { data: SessionInfo[]; ts: number; root: string } | undefined;
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
@@ -237,9 +239,10 @@ function getPathToIdCache(): Map<string, string> {
 }
 
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
+  const root = sessionRoot(sessionId);
   const cached = getPathCache().get(sessionId);
   if (cached) {
-    if (existsSync(cached)) return cached;
+    if (existsSync(cached) && sessionFileBelongsToRoot(cached, root)) return cached;
     // A deleted session must never resolve: callers spawn omp with --resume
     // against the path, and omp silently creates a NEW session when the file
     // is gone. Drop the dead entry directly; the list cache stays valid, so
@@ -249,44 +252,48 @@ export async function resolveSessionPath(sessionId: string): Promise<string | nu
   }
 
   // Cache miss: scan all sessions to populate cache, then retry
-  await listAllSessions();
+  await listAllSessions(root);
   const resolved = getPathCache().get(sessionId);
   if (!resolved) return null;
-  if (!existsSync(resolved)) {
+  if (!existsSync(resolved) || !sessionFileBelongsToRoot(resolved, root)) {
     invalidateSessionPathCache(sessionId);
     return null;
   }
   return resolved;
 }
 
-export async function resolveSessionIdByPath(filePath: string): Promise<string | undefined> {
+export async function resolveSessionIdByPath(filePath: string, selectedRoot?: SessionRoot): Promise<string | undefined> {
+  const root = selectedRoot ?? rootForSessionFile(filePath);
+  if (!root || !sessionFileBelongsToRoot(filePath, root)) return undefined;
   const pathKey = sessionPathKey(filePath);
-  const cached = getPathToIdCache().get(pathKey);
+  const cached = getPathToIdCache().get(`${root.token}\0${pathKey}`);
   if (cached) return cached;
-
-  await listAllSessions();
-  return getPathToIdCache().get(pathKey);
+  const sessions = await listAllSessions(root);
+  return sessions.find(session => sessionPathKey(session.path) === pathKey)?.id;
 }
 
 /**
  * Resolve a `header.parentSession` value (either a session file path or a bare
  * session id — see matchParentSessionId) to the parent's session id.
  */
-export async function resolveParentSessionId(parentSession: string): Promise<string | undefined> {
+export async function resolveParentSessionId(parentSession: string, reference?: string): Promise<string | undefined> {
   if (!parentSession) return undefined;
-  const byPath = await resolveSessionIdByPath(parentSession);
+  const byPath = await resolveSessionIdByPath(parentSession, sessionRoot(reference));
   if (byPath) return byPath;
   // Id form: only accept it when a session file with that id still exists.
-  return (await resolveSessionPath(parentSession)) ? parentSession : undefined;
+  if (/[\\/]/.test(parentSession)) return undefined;
+  const id = qualifySessionId(sessionRoot(reference), parentSession);
+  return (await resolveSessionPath(id)) ? id : undefined;
 }
 
 export function cacheSessionPath(sessionId: string, filePath: string): void {
   const normalizedPath = normalizePath(filePath);
-  const pathKey = sessionPathKey(normalizedPath);
+  const token = sessionRoot(sessionId).token;
+  const pathKey = `${token}\0${sessionPathKey(normalizedPath)}`;
   const pathCache = getPathCache();
   const reverseCache = getPathToIdCache();
   const previousPath = pathCache.get(sessionId);
-  const previousPathKey = previousPath ? sessionPathKey(previousPath) : undefined;
+  const previousPathKey = previousPath ? `${token}\0${sessionPathKey(previousPath)}` : undefined;
   const previousSessionId = reverseCache.get(pathKey);
   const previousOwnerPath = previousSessionId ? pathCache.get(previousSessionId) : undefined;
   if (previousPathKey && previousPathKey !== pathKey && reverseCache.get(previousPathKey) === sessionId) {
@@ -296,7 +303,7 @@ export function cacheSessionPath(sessionId: string, filePath: string): void {
     previousSessionId &&
     previousSessionId !== sessionId &&
     previousOwnerPath &&
-    sessionPathKey(previousOwnerPath) === pathKey
+    `${token}\0${sessionPathKey(previousOwnerPath)}` === pathKey
   ) {
     pathCache.delete(previousSessionId);
   }
@@ -309,7 +316,7 @@ export function invalidateSessionPathCache(sessionId: string): void {
   const reverseCache = getPathToIdCache();
   const filePath = pathCache.get(sessionId);
   pathCache.delete(sessionId);
-  const pathKey = filePath ? sessionPathKey(filePath) : undefined;
+  const pathKey = filePath ? `${sessionRoot(sessionId).token}\0${sessionPathKey(filePath)}` : undefined;
   if (pathKey && reverseCache.get(pathKey) === sessionId) {
     reverseCache.delete(pathKey);
   }
@@ -448,12 +455,12 @@ export class SessionFileTooLargeError extends Error {
  */
 export function getSessionEntriesForDisplay(filePath: string, options: ResolveBlobOptions = {}): SessionEntry[] {
   const entries = loadEntriesOrThrowTooLarge(filePath);
-  return toDisplayEntries(entries, options);
+  return toDisplayEntries(entries, options, filePath);
 }
 
 /** Blob-resolution transform shared by the sync and deduplicated display
  * reads. */
-function toDisplayEntries(entries: SessionEntry[], options: ResolveBlobOptions): SessionEntry[] {
+function toDisplayEntries(entries: SessionEntry[], options: ResolveBlobOptions, filePath: string): SessionEntry[] {
   if (entries.length === 0) return entries;
   // Blob-bearing entries are deep-copied so resolution never mutates the
   // shared cache object; blob-free entries are shared as-is.
@@ -480,7 +487,7 @@ function toDisplayEntries(entries: SessionEntry[], options: ResolveBlobOptions):
     copiedAny = true;
   }
   if (copiedAny) {
-    resolveBlobRefsInEntries(out, options);
+    resolveBlobRefsInEntries(out, { ...options, blobsDir: options.blobsDir ?? blobsForSessionFile(filePath) });
   }
   return out;
 }
@@ -533,12 +540,12 @@ export async function getSessionEntriesForDisplayAsync(
     if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
       cache.delete(key);
       cache.set(key, cached);
-      return toDisplayEntries(cached.entries, options);
+      return toDisplayEntries(cached.entries, options, filePath);
     }
   }
 
   const inFlight = getInFlightEntries().get(key);
-  if (inFlight) return inFlight.then((entries) => toDisplayEntries(entries, options));
+  if (inFlight) return inFlight.then((entries) => toDisplayEntries(entries, options, filePath));
 
   // Defer the synchronous parse by one microtask so same-tick callers land
   // on the in-flight map instead of each starting their own parse.
@@ -546,7 +553,7 @@ export async function getSessionEntriesForDisplayAsync(
   getInFlightEntries().set(key, parse);
   try {
     const entries = await parse;
-    return toDisplayEntries(entries, options);
+    return toDisplayEntries(entries, options, filePath);
   } finally {
     const map = getInFlightEntries();
     if (map.get(key) === parse) map.delete(key);
@@ -703,7 +710,7 @@ export function getSessionHistoryPage(
   cursor: SessionHistoryCursor | null,
   limit: number,
   leafId?: string,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean; includePreCompaction?: boolean } = {},
+  options: { deferThinking?: boolean; deferToolResultImages?: boolean; includePreCompaction?: boolean; blobsDir?: string } = {},
 ): { history: SessionHistoryPage; leafId: string | null; tipId: string | null } {
   const { index, cache, key } = getSessionHistoryIndex(filePath, leafId, !!options.includePreCompaction);
   const version = index.version;
@@ -744,7 +751,7 @@ export function getSessionHistoryPage(
       closeSync(fd);
     }
   }
-  const entries = toDisplayEntries(rawEntries, { skipToolResultImages: options.deferToolResultImages });
+  const entries = toDisplayEntries(rawEntries, { skipToolResultImages: options.deferToolResultImages, blobsDir: options.blobsDir }, filePath);
   const history: SessionHistoryPage = {
     ...page,
     context: {

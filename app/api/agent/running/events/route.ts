@@ -1,5 +1,7 @@
 import { getExitedRpcSessions, getRunningRpcSessions, subscribeRunningSessions } from "@/lib/rpc-manager";
 import { subscribeSessionFileChanges } from "@/lib/session-watcher";
+import { resolveBrowsingSessionRoot } from "@/lib/omp/configuration-context";
+import { sessionRoot } from "@/lib/session-reference";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +9,9 @@ export const dynamic = "force-dynamic";
 // session ids. Also carries refresh hints when a live session's file metadata
 // changes, so the sidebar can show a newly-started session immediately.
 export async function GET(req: Request) {
+  const params = new URL(req.url).searchParams;
+  const root = await resolveBrowsingSessionRoot({ cwd: params.get("cwd"), sessionId: params.get("sessionId") });
+  const belongs = (id: string) => sessionRoot(id).token === root.token;
   // Hoisted so the stream's cancel() (half-open disconnects that never fire
   // the abort signal) can release the heartbeat and the subscriber.
   let streamCleanup: (() => void) | null = null;
@@ -66,24 +71,24 @@ export async function GET(req: Request) {
       unsubscribeRunning = subscribeRunningSessions(({ ids, runningSessions, exitedSessions, refreshSessionList }) => {
         encode({
           type: "running",
-          runningSessionIds: ids,
-          runningSessions,
-          exitedSessions,
+          runningSessionIds: ids.filter(belongs),
+          runningSessions: runningSessions.filter(s => belongs(s.id)),
+          exitedSessions: exitedSessions.filter(s => belongs(s.id)),
           ...(refreshSessionList ? { refreshSessionList: true } : {}),
         });
       });
 
       unsubscribeFiles = subscribeSessionFileChanges((sessionIds) => {
         encode({ type: "sessions-changed", sessionIds, refreshSessionList: true });
-      });
+      }, root);
 
       // Initial snapshot so the client renders the correct state immediately.
-      const initialRunning = getRunningRpcSessions();
+      const initialRunning = getRunningRpcSessions().filter(s => belongs(s.id));
       encode({
         type: "running",
         runningSessionIds: initialRunning.map((s) => s.id),
         runningSessions: initialRunning,
-        exitedSessions: getExitedRpcSessions(),
+        exitedSessions: getExitedRpcSessions().filter(s => belongs(s.id)),
       });
       // Heartbeat to keep the connection alive through proxies/timeouts.
       heartbeatTimer = setInterval(() => {

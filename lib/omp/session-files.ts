@@ -259,9 +259,9 @@ function parseBlobRef(data: string): string | null {
   return BLOB_HASH_RE.test(hash) ? hash : null;
 }
 
-function readBlobSync(hash: string): Buffer | null {
+function readBlobSync(hash: string, blobsDir: string): Buffer | null {
   try {
-    return readFileSync(path.join(getBlobsDir(), hash));
+    return readFileSync(path.join(blobsDir, hash));
   } catch {
     return null;
   }
@@ -286,9 +286,9 @@ function degradeMissingBlobImage(block: Record<string, unknown>, hash: string): 
   delete block.source;
 }
 
-function resolveBlobsInValue(value: unknown, key: string | undefined): void {
+function resolveBlobsInValue(value: unknown, key: string | undefined, blobsDir: string): void {
   if (Array.isArray(value)) {
-    for (const item of value) resolveBlobsInValue(item, key);
+    for (const item of value) resolveBlobsInValue(item, key, blobsDir);
     return;
   }
   if (!isRecord(value)) return;
@@ -301,7 +301,7 @@ function resolveBlobsInValue(value: unknown, key: string | undefined): void {
   ) {
     const hash = parseBlobRef(value.data);
     if (!hash) return;
-    const blob = readBlobSync(hash);
+    const blob = readBlobSync(hash, blobsDir);
     if (blob) record.data = blob.toString("base64");
     else degradeMissingBlobImage(record, hash);
     return;
@@ -313,19 +313,19 @@ function resolveBlobsInValue(value: unknown, key: string | undefined): void {
     isBlobRef(record.result)
   ) {
     const hash = parseBlobRef(record.result);
-    const blob = hash ? readBlobSync(hash) : null;
+    const blob = hash ? readBlobSync(hash, blobsDir) : null;
     if (blob) record.result = blob.toString("base64");
   }
 
   if (typeof record.image_url === "string" && isBlobRef(record.image_url)) {
     const hash = parseBlobRef(record.image_url);
-    const blob = hash ? readBlobSync(hash) : null;
+    const blob = hash ? readBlobSync(hash, blobsDir) : null;
     // Externalized data URLs are stored as the raw UTF-8 data-URL string.
     if (blob) record.image_url = blob.toString("utf8");
   }
 
   for (const [childKey, item] of Object.entries(record)) {
-    resolveBlobsInValue(item, childKey);
+    resolveBlobsInValue(item, childKey, blobsDir);
   }
 }
 
@@ -347,6 +347,7 @@ export interface ResolveBlobOptions {
   /** Leave blob refs inside toolResult messages unresolved (the caller is about
    * to omit those images from the payload anyway). */
   skipToolResultImages?: boolean;
+  blobsDir?: string;
 }
 
 /** Resolve blob references in loaded entries back to inline base64. Mutates in place. */
@@ -360,7 +361,7 @@ export function resolveBlobRefsInEntries(entries: SessionEntry[], options: Resol
       continue;
     }
     if (!containsBlobRef(entry)) continue;
-    resolveBlobsInValue(entry, undefined);
+    resolveBlobsInValue(entry, undefined, options.blobsDir ?? getBlobsDir());
   }
 }
 
@@ -510,7 +511,7 @@ export function loadSessionFile(filePath: string, options: LoadSessionOptions = 
   }
 
   if (options.resolveBlobs) {
-    resolveBlobRefsInEntries(entries, { skipToolResultImages: options.skipToolResultImages });
+    resolveBlobRefsInEntries(entries, options);
   }
 
   return { header, entries, titleSlot };
@@ -1025,8 +1026,7 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
  * requests (sidebar poll, page loads) into a single stat. Per-file scanning is
  * still memoized by scanSessionInfoCached on (size, mtimeMs).
  */
-export async function listAllSessionInfos(): Promise<OmpSessionInfo[]> {
-  const sessionsRoot = getSessionsDir();
+export async function listAllSessionInfos(sessionsRoot = getSessionsDir()): Promise<OmpSessionInfo[]> {
   const files = await listSessionFiles(sessionsRoot);
 
   const sessions: OmpSessionInfo[] = [];
@@ -1102,6 +1102,7 @@ function collectSessionFiles(sessionsRoot: string): string[] {
   const files: string[] = [];
   try {
     for (const dirent of readDirectorySyncRuntime(sessionsRoot, { withFileTypes: true })) {
+      if (dirent.isFile() && dirent.name.endsWith(".jsonl")) files.push(path.join(sessionsRoot, dirent.name));
       if (!dirent.isDirectory()) continue;
       const dirPath = path.join(sessionsRoot, dirent.name);
       let inner: Dirent[];

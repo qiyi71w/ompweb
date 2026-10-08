@@ -28,6 +28,8 @@ export interface ArchiveBrowserProps {
   open: boolean;
   onClose: () => void;
   onRestored: (sessionId: string) => void;
+  sessionId?: string | null;
+  cwd?: string | null;
 }
 
 export function formatArchiveSize(bytes: number): string {
@@ -199,7 +201,7 @@ export function MetadataRow({
   );
 }
 
-export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProps) {
+export function ArchiveBrowser({ open, onClose, onRestored, sessionId, cwd }: ArchiveBrowserProps) {
   const { t, locale } = useI18n();
   const [archives, setArchives] = useState<ArchivedSessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -218,7 +220,10 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
     setError(null);
 
     try {
-      const res = await fetch("/api/sessions/archive");
+      const params = new URLSearchParams();
+      if (sessionId) params.set("sessionId", sessionId);
+      else if (cwd) params.set("cwd", cwd);
+      const res = await fetch(`/api/sessions/archive?${params}`);
       if (!res.ok) {
         const payload = await res.json().catch(() => ({})) as { error?: string; code?: string };
         throw new Error(formatApiError(payload, `errors.http${res.status}`));
@@ -236,7 +241,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [sessionId, cwd]);
 
   useEffect(() => {
     if (open) {
@@ -307,7 +312,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
       setRestoringKey(archive.key);
 
       try {
-        const res = await fetch("/api/sessions/archive", {
+        const res = await fetch(`/api/sessions/archive?sessionId=${encodeURIComponent(archive.id)}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

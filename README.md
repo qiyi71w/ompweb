@@ -120,6 +120,29 @@ Utility replacement waits for active commands; an ongoing login keeps its origin
 context. Saving configuration does not stop an active session. Existing sessions
 retain their spawn environment until restarted.
 
+The existing workspace **Profile** launch setting selects that profile's session
+list, settings, models, authentication and agents. Session URLs retain an opaque
+root token, so refresh, reconnect and a Web server restart reopen the same native
+storage even after the workspace's launch default changes. Bare legacy session
+IDs explicitly select the Web server's default root; they never search other profiles.
+The sidebar shows one selected context, not a cross-profile session inventory.
+
+Root locators are stored atomically in `omp-web-session-roots.json` under the Web
+server's own agent directory (`PI_CODING_AGENT_DIR`, or `~/.omp/agent`). Keep that
+server storage with your deployment: unknown tokens are rejected. This metadata
+contains only canonical agent/profile/session/blob locations, not credentials,
+environment values, native session contents or a second settings store. Native
+session IDs remain unchanged on disk. Custom agent roots, opt-in XDG data storage,
+`PI_CODING_AGENT_SESSION_DIR` and validated `--session-dir` are supported; the CLI
+directory takes precedence over the environment. `--no-session` remains nonpersistent.
+Web archives use the sibling `archive/<session-directory-name>` directory, keeping
+custom session directories separate and the normal `archive/sessions` layout intact.
+
+An offline session reference restores its root and recorded workspace, not past
+unrecorded runtime overrides. Those effective settings remain **Unknown**. Model
+catalog/filter management uses the independently obtained native configuration
+query value, not an assertion about the running session's effective state.
+
 Signing in authenticates the provider but does not alter native model filters.
 An authenticated, disabled provider remains visibly disabled under **Composer
 model picker**. Its **Enable in OMP** action edits the saved disabled-provider

@@ -3,7 +3,9 @@ import { apiErrorResponse } from "@/lib/api-utils";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
-import { getSessionsDir, getSessionDirNameForCwd } from "@/lib/omp/paths";
+import { getSessionDirNameForCwd } from "@/lib/omp/paths";
+import { resolveBrowsingSessionRoot } from "@/lib/omp/configuration-context";
+import { qualifySessionId } from "@/lib/session-reference";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { invalidateSessionFileListCache } from "@/lib/omp/session-files";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
@@ -86,7 +88,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Imported session workspace is not authorized", code: "import_cwd_not_authorized" }, { status: 403 });
     }
 
-    const sessionDir = path.join(getSessionsDir(), getSessionDirNameForCwd(cwd));
+    const params = new URL(req.url).searchParams;
+    const root = await resolveBrowsingSessionRoot({ cwd: params.get("cwd"), sessionId: params.get("sessionId") });
+    const sessionDir = path.join(root.sessionsDir, getSessionDirNameForCwd(cwd));
     mkdirSync(sessionDir, { recursive: true });
     const sessionFile = path.join(sessionDir, `${isoSessionTimestamp()}_${randomUUID()}.jsonl`);
     writeFileSync(sessionFile, rewritten.join("\n") + "\n", "utf8");
@@ -96,7 +100,7 @@ export async function POST(req: Request) {
     invalidateSessionListCache();
     invalidateSessionFileListCache();
 
-    return NextResponse.json({ success: true, sessionFile });
+    return NextResponse.json({ success: true, sessionFile, sessionId: qualifySessionId(root, freshId) });
   } catch (error) {
     if (error instanceof RequestBodyTooLargeError) {
       return NextResponse.json({ error: "Session import request is too large", code: "session_import_request_too_large" }, { status: 413 });

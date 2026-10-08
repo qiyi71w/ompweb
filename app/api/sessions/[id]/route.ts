@@ -28,6 +28,7 @@ import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
 import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { nativeSessionId, qualifySessionId, sessionFileBelongsToRoot, sessionRoot } from "@/lib/session-reference";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -200,7 +201,7 @@ export async function GET(
       }
       return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
     }
-    const displayEntries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
+    const displayEntries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages, blobsDir: sessionRoot(id).blobsDir });
     const leafId = getLeafEntryId(displayEntries);
     const tree = projectTreeForResponse(buildSessionTree(displayEntries));
     const context = buildSessionContext(displayEntries, leafId, { deferThinking, deferToolResultImages });
@@ -208,11 +209,11 @@ export async function GET(
     let modified = header.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     const parentSessionId = header.parentSession
-      ? await resolveParentSessionId(header.parentSession)
+      ? await resolveParentSessionId(header.parentSession, id)
       : undefined;
     const info = {
       path: filePath,
-      id: header.id,
+      id,
       cwd: header.cwd ?? "",
       name: header.title,
       created: header.timestamp,
@@ -322,12 +323,12 @@ export async function DELETE(
     let grandparentPath: string | undefined;
     let grandparentId: string | undefined;
     if (parentSession) {
-      const idForPath = await resolveSessionIdByPath(parentSession);
+      const idForPath = await resolveSessionIdByPath(parentSession, sessionRoot(id));
       if (idForPath) {
         grandparentPath = parentSession;
-        grandparentId = idForPath;
-      } else {
-        const pathForId = await resolveSessionPath(parentSession);
+        grandparentId = nativeSessionId(idForPath);
+      } else if (!/[\\/]/.test(parentSession)) {
+        const pathForId = await resolveSessionPath(qualifySessionId(sessionRoot(id), parentSession));
         if (pathForId) {
           grandparentPath = pathForId;
           grandparentId = parentSession;
@@ -347,6 +348,7 @@ export async function DELETE(
       );
       for (const file of files) {
         const childPath = join(dir, file);
+        if (!sessionFileBelongsToRoot(childPath, sessionRoot(id))) continue;
 
         // Re-parenting rewrites the whole child file; a child at/above the
         // load ceiling would cause a huge allocation (RangeError) during the
@@ -371,7 +373,7 @@ export async function DELETE(
             } catch {
               // Header unreadable — fall back to the basename.
             }
-            skippedChildren.push({ id: oversizedId, reason: "session_child_too_large" });
+            skippedChildren.push({ id: qualifySessionId(sessionRoot(id), oversizedId), reason: "session_child_too_large" });
             continue;
           }
         } catch {
@@ -385,7 +387,7 @@ export async function DELETE(
         // A live omp process owns its session file and flushes its whole
         // in-memory state on write — our rewrite would be clobbered by (or
         // interleaved with) its next flush.
-        const childId = childHeader.id;
+        const childId = childHeader.id ? qualifySessionId(sessionRoot(id), childHeader.id) : undefined;
         if (childId && getRpcSession(childId)?.isAlive?.()) {
           skippedChildren.push({ id: childId, reason: "session_child_live" });
           continue;

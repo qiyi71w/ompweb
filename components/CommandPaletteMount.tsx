@@ -12,6 +12,8 @@ type Props = {
   onSelectSession: (session: SessionInfo) => void;
   onNewSession: () => void;
   currentModel?: string | null;
+  sessionId?: string | null;
+  cwd?: string | null;
 };
 
 /**
