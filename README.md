@@ -102,6 +102,28 @@ grant for every extension tool. Tool, login and editor confirmations remain
 interactive; only your response answers a pending Web confirmation. Saved
 policy changes take effect in new sessions and do not stop an active session.
 
+**Agents** shows project templates before user templates, extension/npm-link
+plugins, marketplace plugins and bundled defaults, with source and shadowed
+paths. OMP 18.8.4 has no read-only complete agent-inventory command; the page
+labels its filesystem inventory and unknown session-only discovery coverage.
+Bundled caches are keyed by binary/version identity. Unpacking never replaces
+an existing user template.
+
+Enable/disable writes native `task.disabledAgents`, including for bundled
+agents. Legacy template `enabled: false` is displayed but preserved, not
+converted. Template edits save only explicit fields with conflict checks,
+preserving comments and unknown metadata. Clearing thinking removes both
+`thinkingLevel` and its `thinking` alias. An explicitly empty Tools field saves
+`tools: []`; native OMP still adds `yield`. Restore inheritance removes the key.
+
+Native dispatch controls expose model overrides and effort settings separately
+from template declarations, plus read-only concurrency and recursion limits.
+Advanced dispatch settings remain managed with `omp config list --json`.
+Template parsing does not prove which model ran: the subagent transcript uses
+native progress's resolved model and shows unknown when that evidence is absent.
+Writes share in-process file serialization and atomic replacement, not a
+cross-process transaction with terminal editors.
+
 
 ## Quick Start
 

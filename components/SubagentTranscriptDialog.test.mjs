@@ -18,8 +18,8 @@ test("shows the provider-qualified model and reasoning effort split from the res
   assert.match(html, /<dt[^>]*>effort<\/dt><dd[^>]*>high<\/dd>/);
 });
 
-test("renders nothing when no resolved model is known", () => {
-  assert.equal(renderToStaticMarkup(React.createElement(SubagentModel, {})), "");
+test("explicitly marks missing native resolved-model evidence as unknown", () => {
+  assert.match(renderToStaticMarkup(React.createElement(SubagentModel, {})), /<dt[^>]*>model<\/dt><dd[^>]*>Unknown<\/dd>/);
 });
 
 test("splits the max effort level and keeps a non-effort suffix in the model id", () => {

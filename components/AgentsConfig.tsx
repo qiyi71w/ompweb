@@ -6,32 +6,23 @@ import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
 
-type AgentInfo = {
-  name: string;
-  description: string;
-  model?: string[];
-  tools?: string[];
-  spawns?: string[] | "*";
-  thinkingLevel?: string;
-  source: "bundled" | "user" | "project";
-  scope: string;
-  filePath: string;
-  valid: boolean;
-  enabled: boolean;
-  body?: string;
-  rawFrontmatter?: Record<string, unknown>;
-};
+import type { AgentInfo } from "@/lib/omp/agents-service";
+import type { AgentTemplateView } from "@/lib/omp/agent-template";
+import type { SettingsOperation } from "@/lib/omp/settings-contract";
+import { useNativeSettings } from "@/hooks/useNativeSettings";
+import { NativeSettingsFields, NativeSettingsScopeBar } from "./NativeSettingsFields";
 
 type AgentsResponse = {
   agents?: AgentInfo[];
   diagnostics?: Array<{ type?: string; message?: string }>;
+  context?: { id: string };
   error?: string;
 };
 
 const inputStyle = { width: "100%", padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", font: "12px var(--font-mono)" } as const;
 const textareaStyle = { width: "100%", padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", font: "12px var(--font-mono)", lineHeight: "1.45" } as const;
 const nativeSelectStyle = { minHeight: 32, padding: "4px 28px 4px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 } as const;
-const THINKING_LEVELS = ["", "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_LEVELS = ["", "inherit", "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 function shorten(p: string) {
   const h = p.replace(/^[^:]*:/, "");
@@ -39,12 +30,7 @@ function shorten(p: string) {
   return h;
 }
 function splitCsv(v: string): string[] { return v.split(",").map((s) => s.trim()).filter(Boolean); }
-function toCsv(arr?: string[] | string): string { if (!arr) return ""; if (typeof arr === "string") return arr; return arr.join(", "); }
-function fileStem(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, "/");
-  const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
-  return fileName.toLowerCase().endsWith(".md") ? fileName.slice(0, -3) : fileName;
-}
+function toCsv(value: unknown): string { return typeof value === "string" ? value : Array.isArray(value) ? value.join(", ") : ""; }
 
 export function AgentsConfig({ cwd }: { cwd: string | null }) {
   const { t, tn } = useI18n();
@@ -59,6 +45,10 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
   const [createScope, setCreateScope] = useState<"user" | "project">("user");
   const [workspaceUnavailable, setWorkspaceUnavailable] = useState(false);
   const [workspaceCheckPending, setWorkspaceCheckPending] = useState(Boolean(cwd));
+  const native = useNativeSettings(workspaceUnavailable ? null : cwd);
+  const [contextId, setContextId] = useState("");
+  const [edits, setEdits] = useState<Record<string, "set" | "unset">>({});
+  const [conflict, setConflict] = useState(false);
   const selectedRef = useRef<string | null>(null);
   const loadGenerationRef = useRef(0);
   const cwdRef = useRef(cwd);
@@ -103,6 +93,8 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       const list = Array.isArray(data.agents) ? data.agents : [];
       if (!isCurrent()) return;
       setAgents(list);
+      setContextId(data.context?.id ?? "");
+      setConflict(false);
       const nextDiagnostics = Array.isArray(data.diagnostics) ? data.diagnostics : [];
       setDiagnostics(nextDiagnostics);
       const diagnosticErrors = nextDiagnostics
@@ -122,7 +114,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       const msg = e instanceof Error ? e.message : String(e);
       setWorkspaceCheckPending(false);
       setMessage(msg);
-    } finally { if (isCurrent()) { setLoading(false); setWorkspaceCheckPending(false); } }
+    } finally { if (isCurrent()) { setLoading(false); setSaving(false); setWorkspaceCheckPending(false); } }
   }, [cwd, creating, t]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -147,20 +139,22 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
     return agents.filter((a) => a.name.toLowerCase().includes(q) || a.description.toLowerCase().includes(q));
   }, [agents, search]);
   const active = useMemo(() => (creating || !selected ? null : agents.find((a) => a.name === selected) ?? null), [agents, selected, creating]);
-  const isBundledActive = active?.scope === "bundled";
+  const isBundledActive = Boolean(active && !active.template);
   const activeProjectUnavailable = active?.scope === "project" && !canEditProject;
   function fillForm(a: AgentInfo) {
     setName(a.name);
     setDescription(a.description);
-    setModelCsv(toCsv(a.model));
-    setToolsCsv(toCsv(a.tools));
-    setSpawnsCsv(toCsv(a.spawns as string[] | string | undefined));
-    setThinkingLevel(a.thinkingLevel ?? "");
+    setModelCsv(toCsv(a.rawFrontmatter?.model));
+    setToolsCsv(toCsv(a.rawFrontmatter?.tools));
+    setSpawnsCsv(toCsv(a.rawFrontmatter?.spawns));
+    setThinkingLevel(typeof a.rawFrontmatter?.thinkingLevel === "string" ? a.rawFrontmatter.thinkingLevel : typeof a.rawFrontmatter?.thinking === "string" ? a.rawFrontmatter.thinking : "");
     setBody(a.body ?? "");
+    setEdits({});
   }
   function clearForm() {
     setName(""); setDescription(""); setModelCsv(""); setToolsCsv("");
     setSpawnsCsv(""); setThinkingLevel(""); setBody("");
+    setEdits({}); setConflict(false);
   }
   const pick = (a: AgentInfo) => { selectedRef.current = a.name; setCreating(false); setSelected(a.name); fillForm(a); setMessage(null); };
   const startCreate = () => { selectedRef.current = null; setCreating(true); setSelected(null); clearForm(); setMessage(null); setCreateScope(canEditProject ? "project" : "user"); };
@@ -176,7 +170,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
     setSaving(true); setMessage(null);
     try {
       const scope: "user" | "project" = canEditProject ? "project" : "user";
-      const res = await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "unpack", scope, cwd: scope === "project" ? cwd : undefined }) });
+      const res = await fetch(`/api/agents?${new URLSearchParams(cwd && !workspaceUnavailable ? { cwd } : {})}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "unpack", scope, contextId }) });
       const data = (await res.json()) as { error?: string; total?: number; written?: number };
       if (!res.ok || data.error) {
         if (isCurrent() && res.status === 403 && scope === "project") setWorkspaceUnavailable(true);
@@ -187,34 +181,37 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       toast.success(t("agentsConfig.unpackedToast", { count }));
       await load();
     } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); }
+    finally { if (isCurrent()) setSaving(false); }
   };
   const save = async () => {
     const trimmedName = name.trim();
     if (!trimmedName) { setMessage(t("agentsConfig.nameRequired")); return; }
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(trimmedName)) { setMessage(t("agentsConfig.namePatternError")); return; }
+    if ((creating || edits.name) && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(trimmedName)) { setMessage(t("agentsConfig.namePatternError")); return; }
     if (!description.trim()) { setMessage(t("agentsConfig.descriptionRequired")); return; }
     const requestGeneration = loadGenerationRef.current;
     const requestCwd = cwd;
     const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd;
     setSaving(true); setMessage(null);
     try {
-      const payload: Record<string, unknown> = { description: description.trim(), body: body || undefined };
-      // Preserve OMP frontmatter that this compact editor does not expose;
-      // the service overlays the fields edited below and always rewrites name.
-      if (!creating && active?.rawFrontmatter) payload.existingFrontmatter = active.rawFrontmatter;
-      if (modelCsv.trim()) payload.model = splitCsv(modelCsv);
-      if (toolsCsv.trim()) payload.tools = splitCsv(toolsCsv);
-      if (spawnsCsv.trim()) payload.spawns = spawnsCsv.trim() === "*" ? "*" : splitCsv(spawnsCsv);
-      if (thinkingLevel) payload.thinkingLevel = thinkingLevel;
-      const scope: "user" | "project" = creating ? createScope : active && active.scope !== "bundled" ? (active.scope as "user" | "project") : canEditProject ? "project" : "user";
-      if (scope === "project" && !canEditProject) {
-        setMessage(t("agentsConfig.selectWorkspaceRequired"));
-        return;
+      const scope = creating ? createScope : active?.template?.scope;
+      if (!scope || (scope === "project" && !canEditProject)) throw new Error(t("agentsConfig.selectWorkspaceRequired"));
+      const params = new URLSearchParams(cwd && !workspaceUnavailable ? { cwd } : {});
+      let original = active?.template;
+      if (creating) {
+        const prepare = await fetch(`/api/agents?${new URLSearchParams({ ...Object.fromEntries(params), scope, name: trimmedName })}`);
+        const prepared = await prepare.json() as { template?: AgentTemplateView; error?: string };
+        if (!prepare.ok || !prepared.template) throw new Error(prepared.error || t("nativeSettings.requestFailed"));
+        original = prepared.template;
+        if (original.exists) throw new Error(t("agentsConfig.nameExists"));
       }
-      const previousName = creating || isBundledActive || !active ? undefined : fileStem(active.filePath);
-      const res = await fetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: scope === "project" ? cwd : undefined, scope, name: trimmedName, previousName, agent: payload }) });
+      if (!original) return;
+      const values: Record<string, unknown> = { name: trimmedName, description: description.trim(), body, model: splitCsv(modelCsv), tools: splitCsv(toolsCsv), spawns: spawnsCsv.trim() === "*" ? "*" : splitCsv(spawnsCsv), thinkingLevel };
+      const intents: Record<string, "set" | "unset"> = creating ? { name: "set", description: "set", body: "set", ...edits } : edits;
+      const operations: SettingsOperation[] = Object.entries(intents).map(([key, op]) => ({ key, op, ...(op === "set" ? { value: values[key] } : {}), baseline: original.fields[key] }));
+      const res = await fetch(`/api/agents?${params}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextId: original.contextId, scope, name: original.name, action: creating ? "create" : "update", baseline: original.baseline, operations }) });
       const data = (await res.json()) as { error?: string };
       if (!res.ok || data.error) {
+        if (res.status === 409 && isCurrent()) { setConflict(true); throw new Error(t("nativeSettings.conflict")); }
         if (isCurrent() && res.status === 403 && scope === "project") setWorkspaceUnavailable(true);
         throw new Error(data.error || `HTTP ${res.status}`);
       }
@@ -222,17 +219,20 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       toast.success(creating ? t("agentsConfig.agentCreatedToast", { name: trimmedName }) : t("agentsConfig.agentSavedToast", { name: trimmedName }));
       selectedRef.current = trimmedName; setCreating(false); setSelected(trimmedName); await load(true);
     } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); }
+    finally { if (isCurrent()) setSaving(false); }
   };
   const remove = async () => {
-    if (!active || active.scope === "bundled" || activeProjectUnavailable) return;
+    if (!active?.template || activeProjectUnavailable || conflict) return;
     const requestGeneration = loadGenerationRef.current;
     const requestCwd = cwd;
     const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd;
     setSaving(true); setMessage(null);
     try {
-      const res = await fetch("/api/agents", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: active.scope === "project" ? cwd : undefined, scope: active.scope, name: fileStem(active.filePath) }) });
+      const original = active.template;
+      const res = await fetch(`/api/agents?${new URLSearchParams(cwd && !workspaceUnavailable ? { cwd } : {})}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextId: original.contextId, scope: original.scope, name: original.name, action: "delete", baseline: original.baseline, operations: [] }) });
       const data = (await res.json()) as { error?: string };
       if (!res.ok || data.error) {
+        if (res.status === 409 && isCurrent()) { setConflict(true); throw new Error(t("nativeSettings.conflict")); }
         if (isCurrent() && res.status === 403 && active.scope === "project") setWorkspaceUnavailable(true);
         throw new Error(data.error || `HTTP ${res.status}`);
       }
@@ -240,14 +240,29 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       toast.success(t("agentsConfig.agentRemovedToast", { name: active.name }));
       selectedRef.current = null; setSelected(null); clearForm(); await load();
     } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); }
+    finally { if (isCurrent()) setSaving(false); }
   };
   const copyPath = async (p: string) => {
     try { await navigator.clipboard.writeText(p); toast.success(t("agentsConfig.pathCopied")); }
     catch { setMessage(p); }
   };
+  const markEdit = (key: string, op: "set" | "unset" = "set") => setEdits((previous) => ({ ...previous, [key]: op }));
+  const disabledField = native.view?.fields["task.disabledAgents"];
+  const disabledAgents = disabledField?.effective.known && Array.isArray(disabledField.effective.value) ? disabledField.effective.value : null;
+  const toggleAgent = async () => {
+    if (!active || !disabledAgents) return;
+    const next = disabledAgents.includes(active.name) ? disabledAgents.filter((name) => name !== active.name) : [...disabledAgents, active.name];
+    if (await native.set("task.disabledAgents", next)) await load();
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <NativeSettingsScopeBar controller={native} workspace={canEditProject} />
+      <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("agentsConfig.discoveryCoverage")}</p>
+      <details className="settings-card" style={{ display: "block" }}><summary style={{ cursor: "pointer", marginBottom: 12 }}>{t("agentsConfig.dispatchSettings")}</summary>
+        <NativeSettingsFields controller={native} keys={["task.disabledAgents", "task.agentModelOverrides", "task.enableEffort", "task.maxEffort", "task.maxConcurrency", "task.maxRecursionDepth"]} />
+        <p>{t("agentsConfig.advancedNative")} <code>omp config list --json</code></p>
+      </details>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text)" }}>
           <Bot size={14} aria-hidden="true" />
@@ -257,7 +272,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
           </span>
         </div>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
-          <button className="agent-config-action" type="button" onClick={() => void load()} disabled={loading} title={t("agentsConfig.reload")} style={{ padding: "5px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: loading ? "wait" : "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+          <button className="agent-config-action" type="button" onClick={() => { void load(); void native.refresh(); }} disabled={loading || saving} title={t("agentsConfig.reload")} style={{ padding: "5px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}>
             <RefreshCw size={13} aria-hidden="true" /> {t("agentsConfig.reload")}
           </button>
           <button className="agent-config-action" type="button" onClick={() => void unpack()} disabled={saving || workspaceCheckPending} title={workspaceUnavailable ? t("agentsConfig.workspaceUnavailableWarning") : workspaceCheckPending ? t("agentsConfig.loadingAgents") : t("agentsConfig.unpackBundled")} style={{ padding: "5px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: saving || workspaceCheckPending ? "wait" : "pointer", fontSize: 12 }}>
@@ -312,7 +327,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
                     <span style={{ minWidth: 0, flex: 1 }}>
                       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
-                        <span style={{ fontSize: 10, padding: "1px 5px", borderRadius: 999, background: badgeBg, color: "var(--text-muted)", border: "1px solid var(--border)", flexShrink: 0 }}>{a.scope === "bundled" ? t("agentsConfig.scopeBundled") : a.scope === "user" ? t("agentsConfig.scopeUser") : t("agentsConfig.scopeProject")}</span>
+                        <span style={{ fontSize: 10, padding: "1px 5px", borderRadius: 999, background: badgeBg, color: "var(--text-muted)", border: "1px solid var(--border)", flexShrink: 0 }}>{t(`agentsConfig.source.${a.source}`)}</span>
                         {!a.valid ? <AlertCircle size={11} aria-hidden="true" style={{ color: "var(--status-error, #e5484d)" }} /> : null}
                       </span>
                       <span style={{ display: "block", marginTop: 2, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.description || "—"}</span>
@@ -328,7 +343,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
             <>
               {isBundledActive ? (
                 <div style={{ padding: "8px 10px", background: "color-mix(in srgb, var(--accent) 10%, var(--bg-panel))", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
-                  <AlertCircle size={12} aria-hidden="true" /> {t("agentsConfig.bundledReadOnlyWarning", { scope: canEditProject ? t("agentsConfig.scopeProject") : t("agentsConfig.scopeUser") })}
+                  <AlertCircle size={12} aria-hidden="true" /> {t("agentsConfig.readonlyTemplate")}
                 </div>
               ) : null}
               <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 12, overflowY: "auto" }}>
@@ -358,22 +373,34 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
                     </label>
                   ) : null}
                 </div>
+                {active && <section style={{ display: "grid", gap: 6, fontSize: 12, overflowWrap: "anywhere" }}>
+                  <label><input type="checkbox" aria-label={t("agentsConfig.nativeEnabled")} checked={disabledAgents !== null && !disabledAgents.includes(active.name)} disabled={!disabledField?.editable || !disabledAgents || native.loading || native.saving || !!native.conflicts.length} onChange={() => void toggleAgent()} /> {t("agentsConfig.nativeEnabled")} {!disabledAgents && t("nativeSettings.unknown")}</label>
+                  {active.legacyEnabled === false && <p role="status">{t("agentsConfig.legacyEnabledWarning")}</p>}
+                  <div>{t("agentsConfig.templateModel")}: <code>{JSON.stringify(active.rawFrontmatter?.model) ?? t("nativeSettings.inherited")}</code></div>
+                  <div>{t("agentsConfig.nativeModelOverride")}: <code>{native.view?.fields["task.agentModelOverrides"]?.effective.known ? JSON.stringify((native.view.fields["task.agentModelOverrides"].effective.value as Record<string, unknown>)?.[active.name]) ?? t("nativeSettings.inherited") : t("nativeSettings.unknown")}</code></div>
+                  <div>{t("agentsConfig.parsedTemplate")}: <code>{JSON.stringify({ model: active.model, thinkingLevel: active.thinkingLevel, tools: active.tools, spawns: active.spawns, blocking: active.blocking, prewalk: active.prewalk, advisor: active.advisor, autoloadSkills: active.autoloadSkills, readSummarize: active.readSummarize })}</code></div>
+                  <p style={{ margin: 0 }}>{t("agentsConfig.actualModelUnknown")}</p>
+                  {!!active.shadowed?.length && <div>{t("agentsConfig.shadows")}{active.shadowed.map((source) => <div key={source.filePath}><code>{t(`agentsConfig.source.${source.source}`)}: {source.filePath}</code></div>)}</div>}
+                  <details><summary>{t("agentsConfig.rawTemplate")}</summary><pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(active.rawFrontmatter, null, 2)}</pre></details>
+                </section>}
+                <fieldset disabled={isBundledActive || saving || conflict || activeProjectUnavailable} style={{ display: "contents" }}>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.name")}</span>
-                  <input value={name} onChange={(e) => setName(e.target.value)} placeholder="designer" style={inputStyle} />
+                  <input value={name} onChange={(e) => { setName(e.target.value); markEdit("name"); }} placeholder="designer" style={inputStyle} />
                 </label>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.description")}</span>
-                  <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("agentsConfig.descPlaceholder")} rows={2} style={textareaStyle} />
+                  <textarea value={description} onChange={(e) => { setDescription(e.target.value); markEdit("description"); }} placeholder={t("agentsConfig.descPlaceholder")} rows={2} style={textareaStyle} />
                 </label>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.modelRoles")}</span>
-                    <input value={modelCsv} onChange={(e) => setModelCsv(e.target.value)} placeholder="@designer, @smol" style={inputStyle} />
+                    <input value={modelCsv} onChange={(e) => { setModelCsv(e.target.value); markEdit("model"); }} placeholder="@designer, @smol" style={inputStyle} />
                   </label>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.thinkingLevel")}</span>
-                    <select value={thinkingLevel} onChange={(e) => setThinkingLevel(e.target.value)} style={nativeSelectStyle}>
+                    <select value={thinkingLevel} onChange={(e) => { setThinkingLevel(e.target.value); markEdit("thinkingLevel", e.target.value ? "set" : "unset"); }} style={nativeSelectStyle}>
+                      {!(THINKING_LEVELS as readonly string[]).includes(thinkingLevel) && <option value={thinkingLevel}>{thinkingLevel}</option>}
                       {THINKING_LEVELS.map((lv) => <option key={lv} value={lv}>{lv || t("agentsConfig.defaultThinking")}</option>)}
                     </select>
                   </label>
@@ -381,31 +408,35 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.spawns")}</span>
-                    <input value={spawnsCsv} onChange={(e) => setSpawnsCsv(e.target.value)} placeholder="task, reviewer  or  *" style={inputStyle} />
+                    <input value={spawnsCsv} onChange={(e) => { setSpawnsCsv(e.target.value); markEdit("spawns"); }} placeholder="task, reviewer  or  *" style={inputStyle} />
                   </label>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.tools")}</span>
-                    <input value={toolsCsv} onChange={(e) => setToolsCsv(e.target.value)} placeholder="read, edit, bash, task" style={inputStyle} />
+                    <input value={toolsCsv} onChange={(e) => { setToolsCsv(e.target.value); markEdit("tools"); }} placeholder="read, edit, bash, task" style={inputStyle} />
                   </label>
                 </div>
+                <p style={{ margin: 0, fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.explicitEmptyTools")}</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{["model", "thinkingLevel", "tools", "spawns"].map((key) => <button type="button" className="settings-back ui-focus-ring" key={key} onClick={() => { markEdit(key, "unset"); if (key === "model") setModelCsv(""); if (key === "thinkingLevel") setThinkingLevel(""); if (key === "tools") setToolsCsv(""); if (key === "spawns") setSpawnsCsv(""); }}>{t("nativeSettings.unset")} {key}{edits[key] === "unset" ? ` · ${t("agentsConfig.pendingUnset")}` : ""}</button>)}</div>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.systemPrompt")}</span>
-                  <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder={t("agentsConfig.systemPromptPlaceholder")} rows={6} style={{ ...textareaStyle, minHeight: 140 }} />
+                  <textarea value={body} onChange={(e) => { setBody(e.target.value); markEdit("body"); }} placeholder={t("agentsConfig.systemPromptPlaceholder")} rows={6} style={{ ...textareaStyle, minHeight: 140 }} />
                 </label>
+                </fieldset>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <button className="agent-config-action" type="button" onClick={() => void save()} disabled={saving || workspaceCheckPending || activeProjectUnavailable} title={workspaceCheckPending ? t("agentsConfig.loadingAgents") : activeProjectUnavailable ? t("agentsConfig.workspaceUnavailableWarning") : creating ? t("agentsConfig.create") : t("agentsConfig.save")} style={{ padding: "7px 14px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "white", cursor: saving || workspaceCheckPending || activeProjectUnavailable ? "wait" : "pointer", opacity: saving || workspaceCheckPending || activeProjectUnavailable ? 0.65 : 1, fontSize: 12 }}>
+                  <button className="agent-config-action" type="button" onClick={() => void save()} disabled={saving || workspaceCheckPending || activeProjectUnavailable || isBundledActive || conflict || (!creating && !Object.keys(edits).length)} title={creating ? t("agentsConfig.create") : t("agentsConfig.save")} style={{ padding: "7px 14px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--bg)", fontSize: 12 }}>
                     <Check size={13} aria-hidden="true" /> {creating ? t("agentsConfig.create") : t("agentsConfig.save")}
                   </button>
                   {creating ? (
                     <button className="agent-config-action" type="button" onClick={cancelCreate} disabled={saving} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>{t("agentsConfig.cancel")}</button>
                   ) : (
-                    <button className="agent-config-action" type="button" onClick={() => void remove()} disabled={saving || isBundledActive || activeProjectUnavailable} title={isBundledActive ? t("agentsConfig.templatesNotice") : activeProjectUnavailable ? t("agentsConfig.workspaceUnavailableWarning") : t("agentsConfig.remove")} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: isBundledActive || activeProjectUnavailable ? "var(--text-dim)" : "var(--status-error)", cursor: saving || isBundledActive || activeProjectUnavailable ? "default" : "pointer", fontSize: 12 }}>
+                    <button className="agent-config-action" type="button" onClick={() => void remove()} disabled={saving || isBundledActive || activeProjectUnavailable || conflict} title={t("agentsConfig.remove")} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--status-error)", fontSize: 12 }}>
                       <Trash2 size={13} aria-hidden="true" /> {t("agentsConfig.remove")}
                     </button>
                   )}
                   {message ? <Alert variant={message.toLowerCase().includes("fail") || message.toLowerCase().includes("error") ? "error" : "info"} description={message} onDismiss={() => setMessage(null)} /> : null}
+                  {conflict && <button type="button" className="settings-back ui-focus-ring" onClick={() => void load(true)}>{t("nativeSettings.refresh")}</button>}
                 </div>
-                <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>{t("agentsConfig.atomicNotice")}</p>
+                <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>{t("agentsConfig.fieldSaveNotice")}</p>
               </div>
             </>
           ) : (

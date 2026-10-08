@@ -1,8 +1,7 @@
 import { execFile } from "child_process";
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { isDeepStrictEqual } from "util";
-import { basename, dirname, join } from "path";
+import { basename, join } from "path";
 import { isMap, parseDocument, type Document } from "yaml";
 import { getSettingsPath } from "./paths";
 import { isRecord } from "../type-guards";
@@ -10,15 +9,12 @@ import { isCompactionMethodOrder } from "../compaction-methods";
 import { assertSettingsTarget, settingsPathIn, type OmpConfigurationContext } from "./configuration-context";
 import { wrapWindowsScript } from "./omp-cli";
 import { APPROVAL_KEY_PREFIX, getNativeSettingDescriptor, NATIVE_SETTINGS_FIELDS, type NativeSettingsView, type NativeSettingView, type SavedSetting, type SettingValue, type SettingsScope, type SettingsWriteRequest } from "./settings-contract";
+import { configurationBaseline, sameConfigurationBaseline as sameToken, serializedConfigurationWrite as serialized, replaceConfigurationFile } from "./configuration-file";
 
 export { resolveConfigurationContext } from "./configuration-context";
 export type { OmpConfigurationContext } from "./configuration-context";
 export type { NativeSettingsView, SettingsWriteRequest, SettingsOperation, SettingsScope } from "./settings-contract";
 
-declare global {
-  var __ompSettingsBaselineSecret: Buffer | undefined;
-  var __ompSettingsFileLocks: Map<string, Promise<void>> | undefined;
-}
 
 function readDocument(path: string): Document {
   const doc = parseDocument(existsSync(path) ? readFileSync(path, "utf8") : "");
@@ -65,8 +61,7 @@ function locations(data: unknown, key: string) {
 }
 
 function token(context: OmpConfigurationContext, scope: SettingsScope, key: string, data: unknown): string {
-  const secret = globalThis.__ompSettingsBaselineSecret ??= randomBytes(32);
-  return createHmac("sha256", secret).update(JSON.stringify([context.view.id, scope, targetPath(context, scope), key, locations(data, key)])).digest("hex");
+  return configurationBaseline([context.view.id, scope, targetPath(context, scope), key, locations(data, key)]);
 }
 
 function fitsShape(key: string, value: unknown, allowUnknownEnum = false): boolean {
@@ -77,7 +72,7 @@ function fitsShape(key: string, value: unknown, allowUnknownEnum = false): boole
     case "number": return typeof value === "number" && Number.isFinite(value);
     case "enum": return typeof value === "string" && (allowUnknownEnum || descriptor.values?.includes(value) === true);
     case "array": return Array.isArray(value) && value.every((item) => typeof item === "string") && (key !== "compaction.methodOrder" || isCompactionMethodOrder(value));
-    case "record": return isRecord(value) && Object.entries(value).every(([role, chain]) => role.trim() && Array.isArray(chain) && chain.every((item) => typeof item === "string" && item.trim()));
+    case "record": return isRecord(value) && Object.entries(value).every(([role, chain]) => role.trim() && (key === "task.agentModelOverrides" ? typeof chain === "string" && !!chain.trim() : Array.isArray(chain) && chain.every((item) => typeof item === "string" && item.trim())));
   }
 }
 
@@ -99,6 +94,14 @@ async function nativeEntries(context: OmpConfigurationContext): Promise<Record<s
   const entries: unknown = JSON.parse(stdout);
   if (!isRecord(entries) || !Object.keys(entries).length || Object.values(entries).some((entry) => !isRecord(entry) || typeof entry.type !== "string")) throw new Error("Native configuration query is malformed");
   return entries as Record<string, NativeEntry>;
+}
+
+/** Internal discovery input only; never forward the full native registry. */
+export async function readNativeAgentSettings(context: OmpConfigurationContext): Promise<Record<string, unknown>> {
+  for (const scope of ["global", "project"] as const) assertSettingsTarget(context, scope, targetPath(context, scope));
+  for (const file of [targetPath(context, "global"), targetPath(context, "project"), ...context.view.launch.configFiles]) readDocument(file).toJS({ maxAliasCount: 100 });
+  const entries = await nativeEntries(context);
+  return Object.fromEntries(["extensions", "enabledProviders", "disabledProviders", "task.disabledAgents"].map((key) => [key, entries[key]?.redacted ? undefined : entries[key]?.value]));
 }
 
 /** A fresh native process is intentional: no utility/session cache or fabricated defaults. */
@@ -163,28 +166,13 @@ export function validateSettingsWriteRequest(request: SettingsWriteRequest): voi
   }
 }
 
-async function serialized<T>(key: string, action: () => Promise<T>): Promise<T> {
-  const locks = globalThis.__ompSettingsFileLocks ??= new Map();
-  const previous = locks.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => { release = resolve; });
-  const queued = previous.then(() => current);
-  locks.set(key, queued);
-  await previous;
-  try { return await action(); }
-  finally { release(); if (locks.get(key) === queued) locks.delete(key); }
-}
-
-function sameToken(expected: string, actual: string): boolean {
-  return /^[a-f0-9]{64}$/.test(expected) && timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(actual, "hex"));
-}
 
 /** Serializes Web writes only; an external writer can still race read/replace. */
 export async function writeNativeSettings(context: OmpConfigurationContext, request: SettingsWriteRequest): Promise<NativeSettingsView> {
   validateSettingsWriteRequest(request);
   const scope = request.scope;
   const approvalKeys = request.operations.filter(({ key }) => key.startsWith(APPROVAL_KEY_PREFIX)).map(({ key }) => key.slice(APPROVAL_KEY_PREFIX.length));
-  const lockKey = scope === "global" ? context.view.agentDir : join(context.view.cwd, ".omp");
+  const lockKey = targetPath(context, scope);
   return serialized(lockKey, async () => {
     const view = await readNativeSettings(context, scope, approvalKeys);
     if (request.contextId !== context.view.id) throw new SettingsConflictError(view, request.operations.map(({ key }) => key));
@@ -213,12 +201,7 @@ export async function writeNativeSettings(context: OmpConfigurationContext, requ
         if (key === "compaction.methodOrder") for (const alias of ["compaction.strategy", "compaction.remoteEnabled"]) { doc.delete(alias); doc.deleteIn(alias.split(".")); }
       } else doc.setIn(settingPath(key), value);
     }
-    mkdirSync(dirname(path), { recursive: true });
-    const temp = `${path}.tmp-${randomUUID()}`;
-    try {
-      writeFileSync(temp, doc.toString(), { encoding: "utf8", mode: existsSync(path) ? statSync(path).mode & 0o777 : 0o600, flag: "wx" });
-      renameSync(temp, path);
-    } finally { rmSync(temp, { force: true }); }
+    replaceConfigurationFile(path, doc.toString());
     return { ...await readNativeSettings(context, scope, approvalKeys), persistence: { saved: true, appliedToRunningSessions: false } };
   });
 }

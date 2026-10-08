@@ -110,6 +110,12 @@ export const NATIVE_SETTINGS_FIELDS: Record<string, SettingDescriptor> = {
   "mcp.notifications": { type: "boolean", label: "mcpResourceUpdates", searchId: "mcp-resource-updates" },
   "mcp.notificationDebounceMs": { type: "number", label: "notificationDebounceMs" },
   "providers.autoThinkingMaxEffort": { type: "enum", label: "autoThinkingMaxEffort", values: ["xhigh", "max"], readOnly: true },
+  "task.disabledAgents": { type: "array", label: "taskDisabledAgents" },
+  "task.agentModelOverrides": { type: "record", label: "taskAgentModelOverrides" },
+  "task.enableEffort": { type: "boolean", label: "taskEnableEffort" },
+  "task.maxEffort": { type: "enum", label: "taskMaxEffort", values: ["minimal", "low", "medium", "high", "xhigh", "max"] },
+  "task.maxConcurrency": { type: "number", label: "taskMaxConcurrency", readOnly: true },
+  "task.maxRecursionDepth": { type: "number", label: "taskMaxRecursionDepth", readOnly: true },
 };
 
 export const APPROVAL_KEY_PREFIX = "tools.approval.";
