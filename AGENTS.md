@@ -76,7 +76,7 @@ app/api/
   models-config/test/route.ts     POST test a configured model/provider
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
   web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume)
-  mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
+  mcp/route.ts                    GET inventory; POST explicit intents/start-live; PUT validate
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   projects/clone/route.ts         POST clone a git URL into a new workspace (NDJSON progress) | DELETE cancel
@@ -471,14 +471,18 @@ during the wait.
   `mcp.json`, `.mcp.json` at the git top level (falls back to cwd for
   non-git dirs). Server definitions support `stdio`, `http`, and `sse`;
   exactly one of `command`/`url` is required and validated before any write.
-- Writes are atomic (temp file + rename), preserve unrelated top-level keys
-  (`disabledServers`, `$schema`, ...), and support rename via `previousName`.
-- The MCP settings live in their own Settings tab (`SettingsTabs` id `"mcp"`,
-  workspace-gated). Server list rows show a config-derived status dot
-  (valid+enabled / disabled / invalid) — no live-connectivity probe exists in
-  the RPC protocol, so failures surface as toasts (`toast.error`) from the
-  editor actions, not inline text.
-- The endpoint is guarded by the same allowed-root rules as `/api/files`.
+- `mcp-contract.ts` defines explicit create/set/unset/rename/delete intentions;
+  context/path/entity/field HMAC baselines reject same-field conflicts with a safe
+  409 view. `jsonc-parser` edits strict JSON surgically; unknown fields and
+  unrelated formatting survive. Writers share `configuration-file.ts`'s queue
+  and atomic replacement, retaining the existing cooperating-writer MCP lock.
+- Inventory uses the trusted selected context. GET only queries an already-live
+  selected wrapper; POST `start-live` requires the visible user action. Native
+  compact lists report configured inventory, so loaded/connected remain unknown.
+  Saving does not reconnect sessions. Project files remain editable while project
+  loading is disabled; user/external sources are read-only.
+- `env`/`headers` use opaque baselines and explicit preserve/replace/clear controls.
+  The endpoint retains workspace allowlist checks and rejects config symlink escapes.
 
 ### Plugins and skills
 - `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK.

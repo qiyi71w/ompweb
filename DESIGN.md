@@ -99,6 +99,14 @@ state.
 Models and allow-listed OMP settings use surgical YAML updates that preserve
 unrelated content. Plugin operations run the installed `omp plugin` CLI. MCP
 configuration is project-local, validated before writing, and saved atomically.
+MCP uses `jsonc-parser` path edits after strict JSON validation, with the shared
+configuration-file queue/HMAC/atomic replacement and the existing MCP lock.
+Field baselines allow unrelated edits to merge; rename/delete baselines protect
+the whole entity. Credential values stay server-side unless explicitly replaced.
+Static inventory and native observations are separate DTOs: a compact native
+configuration list establishes neither loaded nor connected state. GET never
+starts a session; a visible `start-live` action may start the selected context.
+
 
 The common settings adapter resolves a trusted configuration context with
 `resolveConfigurationContext({ cwd?, sessionId? })`: the installed binary and

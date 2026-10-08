@@ -143,6 +143,22 @@ unrecorded runtime overrides. Those effective settings remain **Unknown**. Model
 catalog/filter management uses the independently obtained native configuration
 query value, not an assertion about the running session's effective state.
 
+**Extensions & Tools → MCP** separates file inventory from the selected native
+session's observations. Project loading uses the same workspace/profile context;
+turning it off leaves the project file editable. Viewing or refreshing inventory
+does not start a session. **Start this session and query MCP** is the explicit
+action for an offline session. OMP 18.8.4's compact RPC list reports configured
+servers, not connection or loading evidence, so those states remain **Unknown**.
+
+Project MCP edits submit only changed fields or explicit create/rename/delete
+intentions. Unrelated external edits and unknown JSON fields are preserved;
+same-field/entity changes return a conflict without replaying the old edit.
+Select the latest server or refresh before editing again. `env` and `headers`
+have separate **Preserve**, **Replace**, and **Clear** controls; saved credentials
+are never returned. User-level and external-provider files remain read-only.
+Saving does not reconnect existing sessions. Start a new session to load changes.
+MCP files remain strict JSON: invalid JSON, including comments, is not overwritten.
+
 Signing in authenticates the provider but does not alter native model filters.
 An authenticated, disabled provider remains visibly disabled under **Composer
 model picker**. Its **Enable in OMP** action edits the saved disabled-provider

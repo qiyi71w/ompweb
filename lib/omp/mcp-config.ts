@@ -1,10 +1,14 @@
 import { execFileSync } from "child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { stripAnsi } from "../ansi";
 import { getAgentDir } from "./paths";
 import { isRecord } from "../type-guards";
+import { applyEdits, modify } from "jsonc-parser";
+import { configurationBaseline, configurationFileIdentity, replaceConfigurationFile, sameConfigurationBaseline, serializedConfigurationWrite } from "./configuration-file";
+import type { OmpConfigurationContext } from "./configuration-context";
+import { MCP_EDITABLE_FIELDS, type McpEditableField, type McpProjectView, type McpWriteRequest } from "./mcp-contract";
 
 const MAX_MCP_CONFIG_BYTES = 512 * 1024;
 const MAX_DISCOVERED_MCP_CONFIG_BYTES = 5 * 1024 * 1024;
@@ -22,14 +26,6 @@ export type McpUserConfig = {
 
 export type McpLiveStatus = "connected" | "connecting" | "not_connected" | "inactive" | "disabled" | "configured";
 export type McpLiveServer = { name: string; source: string; status: McpLiveStatus; type?: string };
-
-/** Browser-facing project config must never expose environment variables or HTTP headers. */
-export function redactMcpServer(server: McpServer): McpServer {
-  const safe = { ...server };
-  delete safe.env;
-  delete safe.headers;
-  return safe;
-}
 
 function serverEntries(config: McpFile): Array<{ name: string; config: McpServer }> {
   return Object.entries(config.mcpServers ?? {})
@@ -105,13 +101,14 @@ function readTomlMcpServers(path: string, source: string, disabledNames: Set<str
 }
 
 /** Read installed provider configs by MCP schema, never by individual server name. */
-export function readDiscoveredMcpServers(cwd?: string, disabled = [] as string[]): McpLiveServer[] {
+export function readDiscoveredMcpServers(cwd?: string, disabled = [] as string[], home = homedir(), excludedPaths: string[] = []): McpLiveServer[] {
   const disabledNames = new Set(disabled);
-  const paths = new Set(discoverMcpConfigPaths(homedir()));
+  const paths = new Set(discoverMcpConfigPaths(home));
   if (cwd) for (const path of discoverMcpConfigPaths(cwd)) paths.add(path);
   const servers: McpLiveServer[] = [];
   const seen = new Set<string>();
   for (const path of paths) {
+    if (excludedPaths.includes(path)) continue;
     const source = sourceName(path);
     if (path.endsWith(".toml")) {
       for (const server of readTomlMcpServers(path, source, disabledNames)) {
@@ -126,8 +123,9 @@ export function readDiscoveredMcpServers(cwd?: string, disabled = [] as string[]
       const key = `${source}:${server.name}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const type = typeof server.config.type === "string" ? server.config.type : typeof server.config.url === "string" ? "http" : "stdio";
-      servers.push({ name: server.name, source, status: server.config.enabled === false ? "disabled" : "configured", type });
+      const value = isRecord(server.config) ? server.config : {};
+      const type = typeof value.type === "string" ? value.type : typeof value.url === "string" ? "http" : "stdio";
+      servers.push({ name: server.name, source, status: value.enabled === false ? "disabled" : "configured", type });
     }
   }
   return servers;
@@ -204,7 +202,11 @@ export function resolveMcpConfig(cwd: string): { root: string; path: string } {
   const root = projectRoot(cwd);
   assertCwdWithinRoot(cwd, root);
   const existing = MCP_FILENAMES.map((filename) => join(root, filename)).find(existsSync);
-  return { root, path: existing ?? join(root, MCP_FILENAMES[0]) };
+  const path = existing ?? join(root, MCP_FILENAMES[0]);
+  const canonicalRoot = configurationFileIdentity(root);
+  const relativePath = relative(canonicalRoot, configurationFileIdentity(path));
+  if (relativePath === ".." || relativePath.startsWith(`..${sep}`)) throw new Error("MCP configuration escapes the project root");
+  return { root, path };
 }
 
 export function readMcpConfig(cwd: string): { root: string; path: string; config: McpFile; exists: boolean } {
@@ -311,46 +313,112 @@ function withMcpConfigLock<T>(configPath: string, fn: () => T): T {
   }
 }
 
-export function writeMcpServer(cwd: string, name: string, server: McpServer, previousName?: string): { path: string } {
-  validateMcpServer(name, server);
-  if (previousName !== undefined && !SERVER_NAME.test(previousName)) throw new Error("Invalid previous server name");
-  const current = readMcpConfig(cwd);
-  return withMcpConfigLock(current.path, () => {
-    // Re-read INSIDE the lock so a concurrent writer's mutation is not lost.
-    const locked = readMcpConfig(cwd);
-    const servers = { ...(locked.config.mcpServers ?? {}) };
-    // Capture the old entry before deleting it: a rename must retain credentials
-    // that the browser intentionally redacts from its payload.
-    const previous = servers[previousName ?? name];
-    if (previousName && previousName !== name) delete servers[previousName];
-    // The browser never receives existing credentials. Preserve them when an
-    // edited server omits those fields, rather than deleting them on save.
-    servers[name] = {
-      ...server,
-      ...(previous?.env !== undefined && server.env === undefined ? { env: previous.env } : {}),
-      ...(previous?.headers !== undefined && server.headers === undefined ? { headers: previous.headers } : {}),
-    };
-    const config: McpFile = { ...locked.config, mcpServers: servers };
-    mkdirSync(dirname(locked.path), { recursive: true });
-    const temp = `${locked.path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    renameSync(temp, locked.path);
-    return { path: locked.path };
-  });
+function baseline(context: OmpConfigurationContext, path: string, name: string, field: string, value: unknown): string {
+  return configurationBaseline(["mcp", context.view.id, configurationFileIdentity(path), name, field, value]);
 }
 
-export function deleteMcpServer(cwd: string, name: string): { path: string } {
-  if (!SERVER_NAME.test(name)) throw new Error("Invalid server name");
-  const current = readMcpConfig(cwd);
-  return withMcpConfigLock(current.path, () => {
-    const locked = readMcpConfig(cwd);
-    const servers = { ...(locked.config.mcpServers ?? {}) };
-    if (!(name in servers)) throw new Error("MCP server was not found");
-    delete servers[name];
-    const config: McpFile = { ...locked.config, mcpServers: servers };
-    const temp = `${locked.path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    renameSync(temp, locked.path);
-    return { path: locked.path };
-  });
+export function readMcpProject(context: OmpConfigurationContext): McpProjectView {
+  const file = readMcpConfig(context.view.cwd);
+  return {
+    context: context.view, root: file.root, path: file.path, exists: file.exists,
+    createBaseline: baseline(context, file.path, "", "create", null),
+    servers: serverEntries(file.config).map(({ name, config: raw }) => {
+      const config = isRecord(raw) ? raw : {};
+      let valid = true;
+      try { validateMcpServer(name, raw); } catch { valid = false; }
+      const safe: McpServer = {};
+      const fields = {} as Record<McpEditableField, string>;
+      for (const field of MCP_EDITABLE_FIELDS) {
+        fields[field] = baseline(context, file.path, name, field, [Object.hasOwn(config, field), config[field]]);
+        if (field !== "env" && field !== "headers" && Object.hasOwn(config, field)) safe[field] = config[field];
+      }
+      return { name, config: safe, valid, enabled: config.enabled !== false,
+        baseline: baseline(context, file.path, name, "entity", raw), fields,
+        credentials: { env: Object.hasOwn(config, "env"), headers: Object.hasOwn(config, "headers") } };
+    }),
+  };
+}
+
+export class McpConflictError extends Error {
+  constructor(readonly latest: McpProjectView) { super("MCP configuration changed; review the latest state before editing again"); }
+}
+
+function validateCredentialValue(value: unknown): void {
+  stringRecord(value, "Credentials");
+  if (Object.values(value as Record<string, string>).some((item) => /^(?:\*+|<redacted>|\[redacted\]|•+)$/i.test(item.trim()))) throw new Error("Credential placeholders cannot be saved");
+}
+
+/** Explicit intents only. The shared queue and existing cooperating-writer lock
+ * protect the same canonical file; external editors remain outside this protocol. */
+export async function writeMcpProject(context: OmpConfigurationContext, request: McpWriteRequest): Promise<McpProjectView> {
+  const initial = readMcpProject(context);
+  if (request.contextId !== context.view.id) throw new McpConflictError(initial);
+  if (!Array.isArray(request.operations) || request.operations.length === 0 || request.operations.length > 100) throw new Error("Explicit MCP operations are required");
+  return serializedConfigurationWrite(initial.path, async () => withMcpConfigLock(configurationFileIdentity(initial.path), () => {
+    const current = readMcpProject(context);
+    if (configurationFileIdentity(current.path) !== configurationFileIdentity(initial.path)) throw new McpConflictError(current);
+    const file = readMcpConfig(context.view.cwd);
+    const original = file.config.mcpServers ?? {};
+    const conflict = () => { throw new McpConflictError(current); };
+    const verify = (actual: unknown, expected: string) => { if (typeof actual !== "string" || !sameConfigurationBaseline(actual, expected)) conflict(); };
+    const touched = new Set<string>();
+    for (const operation of request.operations) {
+      if (!isRecord(operation) || typeof operation.name !== "string" || !SERVER_NAME.test(operation.name)) throw new Error("Invalid MCP server name");
+      if (Object.keys(operation).some((key) => !["op", "name", "baseline", "field", "value", "server", "to", "destinationBaseline"].includes(key))) throw new Error("Unsupported MCP operation field");
+      if (request.operations.some((other) => other !== operation && other.name === operation.name && (other.op === "delete" || operation.op === "delete"))) throw new Error("Delete cannot be combined with another intent for the same server");
+      if (operation.op === "rename" && request.operations.some((other) => other !== operation && (other.name === operation.to || (other.op === "rename" && other.to === operation.to)))) throw new Error("Conflicting destination intents");
+      const server = current.servers.find((entry) => entry.name === operation.name);
+      const key = `${operation.name}:${operation.op === "set" || operation.op === "unset" ? operation.field : "entity"}`;
+      if (touched.has(key)) throw new Error("Duplicate MCP operation");
+      touched.add(key);
+      if (operation.op === "create") {
+        verify(operation.baseline, current.createBaseline);
+        if (Object.hasOwn(original, operation.name)) conflict();
+        validateMcpServer(operation.name, operation.server);
+        for (const field of Object.keys(operation.server)) if (!(MCP_EDITABLE_FIELDS as readonly string[]).includes(field)) throw new Error("Unsupported MCP field");
+        for (const field of ["env", "headers"]) if (operation.server[field] !== undefined) validateCredentialValue(operation.server[field]);
+      } else if (operation.op === "set" || operation.op === "unset") {
+        if (!(MCP_EDITABLE_FIELDS as readonly string[]).includes(operation.field)) throw new Error("Unsupported MCP field");
+        if (!server) conflict();
+        if (!isRecord(original[operation.name])) throw new Error("Non-object MCP entries can only be removed");
+        verify(operation.baseline, server!.fields[operation.field]);
+        if (operation.op === "set" && operation.value === undefined) throw new Error("Set requires a value");
+        if (operation.op === "set" && (operation.field === "env" || operation.field === "headers")) validateCredentialValue(operation.value);
+      } else if (operation.op === "rename" || operation.op === "delete") {
+        if (!server) conflict();
+        verify(operation.baseline, server!.baseline);
+        if (operation.op === "rename") {
+          if (!SERVER_NAME.test(operation.to)) throw new Error("Invalid destination name");
+          verify(operation.destinationBaseline, current.createBaseline);
+          if (Object.hasOwn(original, operation.to)) conflict();
+        }
+      } else throw new Error("Unsupported MCP operation");
+    }
+    let text = file.exists ? readFileSync(file.path, "utf8") : "{\n  \"mcpServers\": {}\n}\n";
+    const indent = text.match(/\n([\t ]+)\"/)?.[1] ?? "  ";
+    const change = (path: string[], value: unknown) => {
+      text = applyEdits(text, modify(text, path, value, { formattingOptions: { insertSpaces: !indent.includes("\t"), tabSize: indent.length, eol: text.includes("\r\n") ? "\r\n" : "\n" } }));
+    };
+    // Apply field edits before renames regardless of wire order.
+    const ordered = [...request.operations.filter((operation) => operation.op !== "rename"), ...request.operations.filter((operation) => operation.op === "rename")];
+    for (const operation of ordered) {
+      const path = ["mcpServers", operation.name];
+      if (operation.op === "create") change(path, operation.server);
+      else if (operation.op === "set" || operation.op === "unset") change([...path, operation.field], operation.op === "set" ? operation.value : undefined);
+      else if (operation.op === "delete") change(path, undefined);
+      else if (operation.op === "rename") {
+        const draft = JSON.parse(text) as McpFile;
+        change(["mcpServers", operation.to], draft.mcpServers?.[operation.name]);
+        change(path, undefined);
+      }
+    }
+    const result = JSON.parse(text) as McpFile;
+    for (const operation of request.operations) {
+      const name = operation.op === "rename" ? operation.to : operation.name;
+      if (result.mcpServers?.[name]) validateMcpServer(name, result.mcpServers[name]);
+    }
+    if (Buffer.byteLength(text, "utf8") > MAX_MCP_CONFIG_BYTES) throw new Error("MCP configuration is too large");
+    replaceConfigurationFile(configurationFileIdentity(file.path), text);
+    return readMcpProject(context);
+  }));
 }
