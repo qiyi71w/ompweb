@@ -69,14 +69,14 @@ export function getConfigAgentRoots(): string[] {
  * Files inside the omp config/agent roots that must stay unreadable through the
  * generic file API even though their directory is an allowed root (#135).
  *
- * `~/.omp/agent/agent.db` is omp's credential store (API keys) and `models.yml`
- * can carry an `apiKey` for custom models, so making the config root readable
- * to view a rule file would also hand out secrets over `?type=download`. Both
- * are already reachable through their purpose-built routes
+ * `~/.omp/agent/agent.db` is omp's credential store (API keys), while
+ * `models.yml` and its `models.yaml` fallback can carry custom-provider keys.
+ * Making the config root readable must not expose them over `?type=download`.
+ * Their supported operations are available through purpose-built routes
  * (`app/api/auth/api-key/*`, `app/api/models-config/route.ts`) which redact or
  * scope what they return, so nothing legitimate needs the generic path.
  */
-const CONFIG_ROOT_DENIED_FILES: ReadonlySet<string> = new Set(["agent.db", "models.yml"]);
+const CONFIG_ROOT_DENIED_FILES: ReadonlySet<string> = new Set(["agent.db", "models.yml", "models.yaml"]);
 
 export function isConfigRootDeniedFile(filePath: string): boolean {
   const base = normalizeSlashes(filePath);

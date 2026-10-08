@@ -104,6 +104,8 @@ Stored credentials are not returned to the browser. Leave them untouched or
 choose **Preserve stored credential**, enter a replacement, or explicitly
 choose **Clear stored credential**. The model **Test** action only validates
 registry resolution, using preserved credentials server-side; it sends no prompt.
+Both `models.yml` and its `models.yaml` fallback are blocked from generic file
+reads and downloads under the OMP configuration roots.
 
 Signing in authenticates the provider but does not alter native model filters.
 An authenticated, disabled provider remains visibly disabled under **Composer
