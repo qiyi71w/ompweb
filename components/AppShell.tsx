@@ -9,7 +9,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useNavigationHistory } from "@/hooks/useNavigationHistory";
 import { isMacPlatform, navigateShortcutHint, NAVIGATION_HISTORY_MAX_ENTRIES } from "@/lib/navigation-history";
 import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
-import { nativeSettingsUrl } from "@/hooks/useNativeSettings";
+import { NATIVE_SETTINGS_CHANGED_EVENT, nativeSettingsUrl } from "@/hooks/useNativeSettings";
 import type { NativeSettingsView } from "@/lib/omp/settings-contract";
 import { SessionSidebar } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
@@ -140,18 +140,21 @@ export function AppShell({ appName }: { appName: string }) {
   const nativeSettingsContextUrl = nativeSettingsUrl(selectedSession?.cwd ?? newSessionCwd ?? workspaceOptions.cwd, selectedSession?.id);
   useEffect(() => {
     let active = true;
+    let generation = 0;
     const load = () => {
+      const requestGeneration = ++generation;
       fetch(nativeSettingsContextUrl, { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
         .then((data: NativeSettingsView | null) => {
           const field = data?.fields.hideThinkingBlock.effective;
-          if (active && field?.known && typeof field.value === "boolean") setHideThinkingBlock(field.value);
+          if (active && generation === requestGeneration && field?.known && typeof field.value === "boolean") setHideThinkingBlock(field.value);
         })
         .catch(() => {});
     };
     load();
     window.addEventListener("focus", load);
-    return () => { active = false; window.removeEventListener("focus", load); };
+    window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, load);
+    return () => { active = false; window.removeEventListener("focus", load); window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, load); };
   }, [nativeSettingsContextUrl]);
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
   const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);

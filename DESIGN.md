@@ -128,6 +128,10 @@ replacement. Reads never materialize defaults or quarantine invalid YAML;
 failed capability or YAML checks are read-only. A fresh read follows each
 write; registry caches invalidate after active utility work completes, without
 stopping sessions. Persistence reports `appliedToRunningSessions: false`.
+Successful client writes emit `omp-native-settings-changed`; other mounted
+settings views and the transcript preference reader requery their own trusted
+context. Invalidation received during a save waits for success; a displayed
+409 still requires deliberate review and refresh.
 
 The finite contract covers 39 editable fields plus the read-only native
 `providers.autoThinkingMaxEffort` ceiling. Native registrations gate support,

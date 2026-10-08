@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { NativeSettingsView, SettingsOperation, SettingsScope } from "@/lib/omp/settings-contract";
 
+export const NATIVE_SETTINGS_CHANGED_EVENT = "omp-native-settings-changed";
+
 export interface NativeSettingsController {
   view: NativeSettingsView | null;
   scope: SettingsScope;
@@ -34,6 +36,8 @@ export function useNativeSettings(cwd?: string | null, sessionId?: string | null
   const [conflicts, setConflicts] = useState<string[]>([]);
   const generation = useRef(0);
   const busy = useRef(false);
+  const ownNotification = useRef(false);
+  const pendingInvalidation = useRef(false);
   const url = nativeSettingsUrl(cwd, sessionId, scope);
   const advanceGeneration = useCallback(() => ++generation.current, []);
 
@@ -62,6 +66,16 @@ export function useNativeSettings(cwd?: string | null, sessionId?: string | null
     return () => { advanceGeneration(); };
   }, [refresh, advanceGeneration]);
 
+  useEffect(() => {
+    const invalidate = () => {
+      if (ownNotification.current || conflicts.length > 0) return;
+      if (busy.current) pendingInvalidation.current = true;
+      else void refresh();
+    };
+    window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, invalidate);
+    return () => window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, invalidate);
+  }, [refresh, conflicts.length]);
+
   const write = useCallback(async (changes: Array<{ key: string; op: "set" | "unset"; value?: unknown }>) => {
     if (!view || loading || busy.current || conflicts.length) return false;
     const requestGeneration = generation.current;
@@ -69,6 +83,7 @@ export function useNativeSettings(cwd?: string | null, sessionId?: string | null
     busy.current = true;
     setSaving(true);
     setError(null);
+    let succeeded = false;
     try {
       const response = await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextId: view.context.id, scope, operations }) });
       const data = await response.json() as NativeSettingsView & { latest?: NativeSettingsView; conflicts?: string[]; code?: string };
@@ -81,6 +96,12 @@ export function useNativeSettings(cwd?: string | null, sessionId?: string | null
       }
       if (!response.ok) { setError(data.code ?? "save-failed"); return false; }
       setView(data);
+      succeeded = true;
+      if (data.persistence?.saved) {
+        ownNotification.current = true;
+        try { window.dispatchEvent(new window.Event(NATIVE_SETTINGS_CHANGED_EVENT)); }
+        finally { ownNotification.current = false; }
+      }
       return true;
     } catch {
       if (generation.current === requestGeneration) setError("save-failed");
@@ -88,8 +109,11 @@ export function useNativeSettings(cwd?: string | null, sessionId?: string | null
     } finally {
       busy.current = false;
       setSaving(false);
+      const invalidated = pendingInvalidation.current;
+      pendingInvalidation.current = false;
+      if (invalidated && succeeded && generation.current === requestGeneration) void refresh();
     }
-  }, [view, loading, conflicts, url, scope]);
+  }, [view, loading, conflicts, url, scope, refresh]);
 
   return { view, scope, setScope, loading, saving, error, conflicts, refresh, write,
     set: (key: string, value: unknown) => write([{ key, op: "set", value }]),
