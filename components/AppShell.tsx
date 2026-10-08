@@ -9,6 +9,8 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useNavigationHistory } from "@/hooks/useNavigationHistory";
 import { isMacPlatform, navigateShortcutHint, NAVIGATION_HISTORY_MAX_ENTRIES } from "@/lib/navigation-history";
 import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
+import { nativeSettingsUrl } from "@/hooks/useNativeSettings";
+import type { NativeSettingsView } from "@/lib/omp/settings-contract";
 import { SessionSidebar } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
@@ -135,19 +137,22 @@ export function AppShell({ appName }: { appName: string }) {
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
   const [hideThinkingBlock, setHideThinkingBlock] = useState(false);
+  const nativeSettingsContextUrl = nativeSettingsUrl(selectedSession?.cwd ?? newSessionCwd ?? workspaceOptions.cwd, selectedSession?.id);
   useEffect(() => {
-    // omp's own setting, so the transcript hides thinking when the TUI does.
-    // Re-read on focus: the TUI or another tab may have changed it.
+    let active = true;
     const load = () => {
-      fetch("/api/omp-settings")
+      fetch(nativeSettingsContextUrl, { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
-        .then((data: { settings?: { hideThinkingBlock?: boolean } } | null) => { if (data) setHideThinkingBlock(data.settings?.hideThinkingBlock === true); })
+        .then((data: NativeSettingsView | null) => {
+          const field = data?.fields.hideThinkingBlock.effective;
+          if (active && field?.known && typeof field.value === "boolean") setHideThinkingBlock(field.value);
+        })
         .catch(() => {});
     };
     load();
     window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
-  }, []);
+    return () => { active = false; window.removeEventListener("focus", load); };
+  }, [nativeSettingsContextUrl]);
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
   const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);
   const [openUrlAutomatically, setOpenUrlAutomatically] = useState(false);

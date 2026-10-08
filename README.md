@@ -64,6 +64,31 @@ available for a selected running session when notices are off. Inspection does
 not resume stopped sessions. Missing support or no running session is unavailable,
 not a clean result.
 
+## Native settings and inheritance
+
+Settings, **API Keys & Providers → OMP System → Retry & fallback**, and
+**Native OMP registry** show values read from your installed OMP. The context
+card identifies the binary/version, workspace, profile and target file.
+Choose **Global / profile** or **Workspace** before editing. A saved override
+is shown separately from the native effective value; **Restore inheritance**
+removes that field from the selected layer rather than writing a guessed
+default. Explicit `false`, `0` and empty lists are preserved.
+
+Only the changed fields are saved. Unrelated terminal edits are retained. If
+the same field changed elsewhere, review the fresh values and use **Refresh
+native values** before retrying. Saving does not restart or stop sessions;
+each field explains when its saved value is used. Session-only launch state
+that a configuration query cannot reproduce is shown as unknown.
+
+Unsupported settings and failed queries are read-only. OMP 18.8.4 does not
+register Auto Thinking Source, Skill startup notices or Advisor for subagents;
+their saved values are retained. The automatic-thinking ceiling is displayed
+as a native constraint. Existing global `config.yaml` is updated in place.
+OMP 18.8.4 ignores project `.omp/config.yaml`, so that project target remains
+read-only and no `config.yml` is silently created; ordinary project
+`.omp/config.yml` is writable. Invalid YAML is never overwritten.
+
+
 ## Quick Start
 
 **Run directly without installing:**

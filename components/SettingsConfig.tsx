@@ -3,8 +3,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
-import { COMPACTION_METHODS, DEFAULT_COMPACTION_METHOD_ORDER, type CompactionMethod } from "@/lib/compaction-methods";
+import { ArrowLeft, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
+import { useNativeSettings } from "@/hooks/useNativeSettings";
+import { NativeSettingsFields, NativeSettingsScopeBar } from "./NativeSettingsFields";
 import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from "@/lib/omp/agent-env-policy";
 import { isRecord } from "@/lib/type-guards";
 import { Alert } from "@/components/ui/field";
@@ -47,23 +48,6 @@ type WindowsServiceStatus = {
   version: string;
 };
 
-type NativeSettings = {
-  defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  providers?: { autoThinkingSource?: "classifier" | "vendor" };
-  hideThinkingBlock?: boolean;
-  externalThinking?: boolean;
-  textVerbosity?: "low" | "medium" | "high";
-  personality?: "default" | "friendly" | "pragmatic" | "none";
-  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
-  tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
-  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
-  memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
-  autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
-  mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
-  mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
-  skills?: { showStartupDiagnostics?: boolean };
-  retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean };
-};
 
 const nativeSelectStyle = {
   minHeight: "var(--control-height)",
@@ -552,66 +536,6 @@ function NativeSetting({ label, description, scope, searchId, children }: { labe
   );
 }
 
-/** Mirrors omp's ordered multi-select (`compaction.methodOrder`): checked methods run in
- * their numbered order, unchecked ones are skipped; none checked disables automatic compaction. */
-function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly CompactionMethod[]; onChange: (next: CompactionMethod[]) => void } & EnhancedChildProps) {
-  const { t } = useI18n();
-  const groupRef = useRef<HTMLDivElement>(null);
-  // The moved row is re-inserted in the DOM once the save lands, which drops focus.
-  const refocusRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!refocusRef.current) return;
-    groupRef.current?.querySelector<HTMLButtonElement>(`[data-move="${refocusRef.current}"]`)?.focus();
-    refocusRef.current = null;
-  }, [value]);
-  const rows = [...value, ...COMPACTION_METHODS.filter((method) => !value.includes(method))];
-  const move = (method: CompactionMethod, delta: -1 | 1) => {
-    const index = value.indexOf(method);
-    if (index === -1 || !value[index + delta]) return;
-    const next = [...value];
-    [next[index], next[index + delta]] = [next[index + delta], next[index]];
-    refocusRef.current = `${method}:${delta}`;
-    onChange(next);
-  };
-  return (
-    <div ref={groupRef} role="group" className="compaction-method-order" {...aria}>
-      {rows.map((method) => {
-        const position = value.indexOf(method);
-        const label = t(`settingsConfig.compactionMethod.${method}`);
-        const description = t(`settingsConfig.compactionMethod.${method}Desc`);
-        const descId = `compaction-method-desc-${method}`;
-        const moveButton = (delta: -1 | 1) => {
-          const name = t(delta < 0 ? "settingsConfig.moveCompactionMethodUp" : "settingsConfig.moveCompactionMethodDown", { method: label });
-          const unavailable = position === -1 || !value[position + delta];
-          return (
-            <button type="button" data-move={`${method}:${delta}`} aria-disabled={unavailable} onClick={() => move(method, delta)} title={name} aria-label={name} className="ui-focus-ring">
-              {delta < 0 ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-            </button>
-          );
-        };
-        return (
-          <div key={method} title={description} className="compaction-method-row" data-selected={position !== -1}>
-            <label>
-              <input
-                type="checkbox"
-                checked={position !== -1}
-                aria-label={position === -1 ? label : t("settingsConfig.compactionMethodPosition", { method: label, position: position + 1 })}
-                aria-describedby={descId}
-                onChange={(event) => onChange(event.target.checked ? [...value, method] : value.filter((item) => item !== method))}
-              />
-              <span aria-hidden="true" className="compaction-method-position">{position === -1 ? "" : `${position + 1}.`}</span>
-              <span>{label}</span>
-              <span id={descId} hidden>{description}</span>
-            </label>
-            {moveButton(-1)}
-            {moveButton(1)}
-          </div>
-        );
-      })}
-      <span role="status" className="settings-card-desc">{value.length === 0 ? t("settingsConfig.compactionMethodsNone") : ""}</span>
-    </div>
-  );
-}
 
 export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
@@ -729,85 +653,15 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [t]);
 
 
-  const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
-  const [nativeSettingsError, setNativeSettingsError] = useState<string | null>(null);
-  const [nativeSettingsLoading, setNativeSettingsLoading] = useState(true);
-  const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
+  const native = useNativeSettings(cwd, sessionId);
+  const nativeSettingsLoading = native.loading;
+  const nativeSettingsError = native.error;
+  const nativeSavesInFlight = native.saving ? 1 : 0;
   const [isPending, startTransition] = useTransition();
-  const latestNativeSettingsRef = useRef<NativeSettings | null>(null);
-  const nativeSaveDrainingRef = useRef(false);
-  const nativeSettingsMutatedRef = useRef(false);
-
-  const loadNativeSettings = useCallback(() => {
-    nativeSettingsMutatedRef.current = false;
-    setNativeSettingsLoading(true);
-    setNativeSettingsError(null);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12000);
-    fetch("/api/omp-settings", { signal: controller.signal })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
-      .then((data: { settings?: NativeSettings }) => {
-        if (!nativeSettingsMutatedRef.current) setNativeSettings(data.settings ?? {});
-      })
-      .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)))
-      .finally(() => {
-        clearTimeout(timeout);
-        setNativeSettingsLoading(false);
-      });
-  }, []);
-
   useEffect(() => {
-    void loadNativeSettings();
-  }, [loadNativeSettings]);
-
-  const saveNativeSettings = useCallback((next: NativeSettings) => {
-    nativeSettingsMutatedRef.current = true;
-    setNativeSettings(next);
-    setNativeSettingsError(null);
-    latestNativeSettingsRef.current = next;
-    if (nativeSaveDrainingRef.current) return;
-    nativeSaveDrainingRef.current = true;
-    setNativeSavesInFlight((count) => count + 1);
-
-    void (async () => {
-      try {
-        while (latestNativeSettingsRef.current !== null) {
-          const snapshot = latestNativeSettingsRef.current;
-          latestNativeSettingsRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = (await response.json()) as { settings?: NativeSettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            if (latestNativeSettingsRef.current === null) setNativeSettings(data.settings ?? snapshot);
-          } catch (error) {
-            setNativeSettingsError(error instanceof Error ? error.message : String(error));
-            break;
-          }
-        }
-      } finally {
-        nativeSaveDrainingRef.current = false;
-        setNativeSavesInFlight((count) => Math.max(0, count - 1));
-      }
-    })();
-  }, []);
-
-  const currentSettings = useCallback((): NativeSettings => latestNativeSettingsRef.current ?? nativeSettings ?? {}, [nativeSettings]);
-
-  const patchSettings = useCallback((patch: Partial<NativeSettings>) => {
-    void saveNativeSettings({ ...currentSettings(), ...patch });
-  }, [currentSettings, saveNativeSettings]);
-
-  const patchSection = useCallback(<K extends keyof NativeSettings,>(key: K, patch: Partial<NonNullable<NativeSettings[K]>>) => {
-    const base = latestNativeSettingsRef.current;
-    const section = ((base ?? nativeSettings)?.[key] ?? {}) as object;
-    void saveNativeSettings({ ...currentSettings(), [key]: { ...section, ...patch } });
-  }, [currentSettings, nativeSettings, saveNativeSettings]);
-
-  const patchApproval = useCallback((patch: Partial<NonNullable<NonNullable<NativeSettings["tools"]>["approval"]>>) => {
-    const base = latestNativeSettingsRef.current ?? nativeSettings ?? {};
-    const tools = base.tools ?? {};
-    void saveNativeSettings({ ...base, tools: { ...tools, approval: { ...(tools.approval ?? {}), ...patch } } });
-  }, [nativeSettings, saveNativeSettings]);
+    const field = native.view?.fields.hideThinkingBlock;
+    if (field?.effective.known && typeof field.effective.value === "boolean") onHideThinkingBlockChange?.(field.effective.value);
+  }, [native.view, onHideThinkingBlockChange]);
 
   const checkForUpdate = useCallback(async (force = false) => {
     if (ompUpdateDisabled) return;
@@ -919,7 +773,6 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
       }
     }
     for (const setting of SETTING_INDEX) {
-      if (setting.id === "auto-thinking-source" && nativeSettings?.defaultThinkingLevel !== "auto") continue;
       const trLabel = t(setting.labelKey);
       const trDesc = t(setting.descKey);
       const trSection = t(setting.sectionKey);
@@ -932,7 +785,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
       }
     }
     return results;
-  }, [trimmedQuery, t, nativeSettings?.defaultThinkingLevel]);
+  }, [trimmedQuery, t]);
 
   const openSearchResult = useCallback((result: SearchResult) => {
     startTransition(() => onSelectTab(result.tab));
@@ -996,7 +849,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             </span>
           ) : nativeSettingsError ? null : (
             <span className="settings-save-status" style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)" }}>
-              {t("settingsConfig.autoSaved")}
+              {t(native.view?.persistence?.saved ? "nativeSettings.saved" : "nativeSettings.nativeRead")}
             </span>
           )}
         </div>
@@ -1063,22 +916,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
               </div>
             ) : (
               <>
-            {nativeSettingsRequired && nativeSettingsError && (
-              <div style={{ margin: 16 }}>
-                <Alert variant="error" description={nativeSettingsError} onDismiss={() => setNativeSettingsError(null)} />
-              </div>
-            )}
-            {nativeSettingsRequired && nativeSettingsError && (
-              <div style={{ margin: "0 16px 16px", display: "flex", justifyContent: "flex-end" }}>
-                <button
-                  type="button"
-                  onClick={() => void loadNativeSettings()}
-                  style={{ minHeight: "var(--control-height)", padding: "5px var(--control-padding-inline)", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: "var(--text-sm)", fontWeight: 600 }}
-                >
-                  {t("chatWindow.retry")}
-                </button>
-              </div>
-            )}
+            {nativeSettingsRequired && <div style={{ margin: "16px 16px 0" }}><NativeSettingsScopeBar controller={native} workspace={workspaceReady} /></div>}
 
             {/* GENERAL & UI TAB */}
             {currentTab === "general" && (
@@ -1142,9 +980,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <NativeSetting searchId="provider-usage" label={t("settingsConfig.providerUsage")} description={t("settingsConfig.providerUsageDesc")} scope="UI">
                     <ToggleSwitch checked={providerUsageVisible} onChange={onProviderUsageVisibleChange} />
                   </NativeSetting>
-                  <NativeSetting searchId="skill-startup-notices" label={t("settingsConfig.skillStartupNotices")} description={t("settingsConfig.skillStartupNoticesDesc")} scope="Native OMP">
-                    <ToggleSwitch checked={nativeSettings?.skills?.showStartupDiagnostics !== false} disabled={nativeSettingsLoading} onChange={(enabled) => patchSection("skills", { showStartupDiagnostics: enabled })} />
-                  </NativeSetting>
+                  <NativeSettingsFields controller={native} keys={["skills.showStartupDiagnostics"]} />
                   <NativeSetting searchId="chat-font-size" label={t("settingsConfig.chatFontSize")} description={t("settingsConfig.chatFontSizeDesc")} scope="UI">
                     <select
                       style={nativeSelectStyle}
@@ -1221,38 +1057,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.toolSafetyApprovalsDesc")}</p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                  <NativeSetting searchId="approval-mode" label={t("settingsConfig.approvalMode")} description={t("settingsConfig.approvalModeDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.tools?.approvalMode ?? "yolo"}
-                      onChange={(event) => patchSection("tools", { approvalMode: event.target.value as "always-ask" | "write" | "yolo" })}
-                    >
-                      <option value="always-ask" style={nativeOptionStyle}>{t("settingsConfig.alwaysAsk")}</option>
-                      <option value="write" style={nativeOptionStyle}>{t("settingsConfig.allowWrites")}</option>
-                      <option value="yolo" style={nativeOptionStyle}>{t("settingsConfig.autoApproveYolo")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="bash-override" label={t("settingsConfig.bashOverride")} description={t("settingsConfig.bashOverrideDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.tools?.approval?.bash ?? "prompt"}
-                      onChange={(event) => patchApproval({ bash: event.target.value as "allow" | "prompt" | "deny" })}
-                    >
-                      <option value="allow" style={nativeOptionStyle}>{t("settingsConfig.allow")}</option>
-                      <option value="prompt" style={nativeOptionStyle}>{t("settingsConfig.alwaysAsk")}</option>
-                      <option value="deny" style={nativeOptionStyle}>{t("settingsConfig.deny")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="extension-tool-requests" label={t("settingsConfig.extensionToolRequests")} description={t("settingsConfig.extensionToolRequestsDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.tools?.approval?.extension ?? "prompt"}
-                      onChange={(event) => patchApproval({ extension: event.target.value as "allow" | "prompt" })}
-                    >
-                      <option value="prompt" style={nativeOptionStyle}>{t("settingsConfig.askEveryTime")}</option>
-                      <option value="allow" style={nativeOptionStyle}>{t("settingsConfig.autoApprove")}</option>
-                    </select>
-                  </NativeSetting>
+                  <NativeSettingsFields controller={native} keys={["tools.approvalMode", "tools.approval.bash", "tools.approval.extension"]} />
                 </div>
               </div>
             )}
@@ -1265,66 +1070,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.modelDefaultsDesc")}</p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                  <NativeSetting searchId="reasoning" label={t("settingsConfig.reasoning")} description={t("settingsConfig.reasoningDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.defaultThinkingLevel ?? "high"}
-                      onChange={(e) => patchSettings({ defaultThinkingLevel: e.target.value as NativeSettings["defaultThinkingLevel"] })}
-                    >
-                      {["auto", "minimal", "low", "medium", "high", "xhigh", "max"].map((l) => (
-                        <option key={l} value={l} style={nativeOptionStyle}>{l}</option>
-                      ))}
-                    </select>
-                  </NativeSetting>
-                  {nativeSettings?.defaultThinkingLevel === "auto" && (
-                    <NativeSetting searchId="auto-thinking-source" label={t("settingsConfig.autoThinkingSource")} description={t("settingsConfig.autoThinkingSourceDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
-                        value={nativeSettings.providers?.autoThinkingSource ?? "classifier"}
-                        onChange={(e) => patchSection("providers", {
-                          autoThinkingSource: e.target.value === "vendor" ? "vendor" : "classifier",
-                        })}
-                      >
-                        <option value="classifier" style={nativeOptionStyle}>{t("settingsConfig.autoThinkingClassifier")}</option>
-                        <option value="vendor" style={nativeOptionStyle}>{t("settingsConfig.autoThinkingVendor")}</option>
-                      </select>
-                    </NativeSetting>
-                  )}
-                  <NativeSetting searchId="verbosity" label={t("settingsConfig.verbosity")} description={t("settingsConfig.verbosityDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.textVerbosity ?? "medium"}
-                      onChange={(e) => patchSettings({ textVerbosity: e.target.value as NativeSettings["textVerbosity"] })}
-                    >
-                      <option value="low" style={nativeOptionStyle}>{t("settingsConfig.verbosityLow")}</option>
-                      <option value="medium" style={nativeOptionStyle}>{t("settingsConfig.verbosityMedium")}</option>
-                      <option value="high" style={nativeOptionStyle}>{t("settingsConfig.verbosityHigh")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="personality" label={t("settingsConfig.personality")} description={t("settingsConfig.personalityDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.personality ?? "default"}
-                      onChange={(e) => patchSettings({ personality: e.target.value as NativeSettings["personality"] })}
-                    >
-                      <option value="default" style={nativeOptionStyle}>{t("settingsConfig.personalityDefault")}</option>
-                      <option value="friendly" style={nativeOptionStyle}>{t("settingsConfig.personalityFriendly")}</option>
-                      <option value="pragmatic" style={nativeOptionStyle}>{t("settingsConfig.personalityPragmatic")}</option>
-                      <option value="none" style={nativeOptionStyle}>{t("settingsConfig.personalityNone")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="thinking-blocks" label={t("settingsConfig.thinkingBlocks")} description={t("settingsConfig.thinkingBlocksDesc")} scope="Native OMP">
-                    <ToggleSwitch
-                      checked={nativeSettings?.hideThinkingBlock ?? false}
-                      onChange={(checked) => { patchSettings({ hideThinkingBlock: checked }); onHideThinkingBlockChange?.(checked); }}
-                    />
-                  </NativeSetting>
-                  <NativeSetting searchId="external-thinking" label={t("settingsConfig.externalThinking")} description={t("settingsConfig.externalThinkingDesc")} scope="Native OMP">
-                    <ToggleSwitch
-                      checked={nativeSettings?.externalThinking ?? false}
-                      onChange={(checked) => patchSettings({ externalThinking: checked })}
-                    />
-                  </NativeSetting>
+                  <NativeSettingsFields controller={native} keys={["defaultThinkingLevel", "providers.autoThinkingSource", "providers.autoThinkingMaxEffort", "textVerbosity", "personality", "hideThinkingBlock", "externalThinking"]} />
                 </div>
               </div>
             )}
@@ -1336,7 +1082,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsTabs.providers.label")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsTabs.providers.description")}</p>
                 </div>
-                <ModelsConfig embedded onClose={onClose} onSaved={onModelsSaved} />
+                <ModelsConfig embedded cwd={cwd ?? undefined} sessionId={sessionId ?? undefined} onClose={onClose} onSaved={onModelsSaved} />
               </div>
             )}
 
@@ -1372,30 +1118,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <div className="settings-section-title" style={{ fontSize: 13.5, fontWeight: 600, margin: 0 }}>{t("settingsConfig.contextCompaction")}</div>
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12.5, lineHeight: 1.45 }}>{t("settingsConfig.contextCompactionDesc")}</p>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
-                    <NativeSetting searchId="automatic-compaction" label={t("settingsConfig.automaticCompaction")} description={t("settingsConfig.automaticCompactionDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.compaction?.enabled ?? true}
-                        onChange={(checked) => patchSection("compaction", { enabled: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="continue-after-compaction" label={t("settingsConfig.continueAfterCompaction")} description={t("settingsConfig.continueAfterCompactionDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.compaction?.autoContinue ?? true}
-                        onChange={(checked) => patchSection("compaction", { autoContinue: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="compaction-method-order" label={t("settingsConfig.compactionMethodOrder")} description={t("settingsConfig.compactionMethodOrderDesc")} scope="Native OMP">
-                      <CompactionMethodOrder
-                        value={nativeSettings?.compaction?.methodOrder ?? DEFAULT_COMPACTION_METHOD_ORDER}
-                        onChange={(methodOrder) => patchSection("compaction", { methodOrder })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="compact-mid-turn" label={t("settingsConfig.compactMidTurn")} description={t("settingsConfig.compactMidTurnDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.compaction?.midTurnEnabled ?? true}
-                        onChange={(checked) => patchSection("compaction", { midTurnEnabled: checked })}
-                      />
-                    </NativeSetting>
+                    <NativeSettingsFields controller={native} keys={["compaction.enabled", "compaction.autoContinue", "compaction.methodOrder", "compaction.midTurnEnabled", "compaction.keepRecentTokens"]} />
                   </div>
                 </section>
 
@@ -1404,53 +1127,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <div className="settings-section-title" style={{ fontSize: 13.5, fontWeight: 600, margin: 0 }}>{t("settingsConfig.memoryAutoLearn")}</div>
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12.5, lineHeight: 1.45 }}>{t("settingsConfig.memoryAutoLearnDesc")}</p>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
-                    <NativeSetting searchId="memory-backend" label={t("settingsConfig.memoryBackend")} description={t("settingsConfig.memoryBackendDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
-                        value={nativeSettings?.memory?.backend ?? "mnemopi"}
-                        onChange={(e) => patchSection("memory", { backend: e.target.value as NonNullable<NativeSettings["memory"]>["backend"] })}
-                      >
-                        <option value="off" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendOff")}</option>
-                        <option value="local" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendLocal")}</option>
-                        <option value="mnemopi" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendMnemopi")}</option>
-                        <option value="hindsight" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendHindsight")}</option>
-                      </select>
-                    </NativeSetting>
-                    <NativeSetting searchId="enable-auto-learn" label={t("settingsConfig.enableAutoLearn")} description={t("settingsConfig.enableAutoLearnDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.autolearn?.enabled ?? true}
-                        onChange={(checked) => patchSection("autolearn", { enabled: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="private-capture-turn" label={t("settingsConfig.privateCaptureTurn")} description={t("settingsConfig.privateCaptureTurnDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.autolearn?.autoContinue ?? true}
-                        onChange={(checked) => patchSection("autolearn", { autoContinue: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="memory-scope" label={t("settingsConfig.memoryScope")} description={t("settingsConfig.memoryScopeDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
-                        value={nativeSettings?.mnemopi?.scoping ?? "per-project"}
-                        onChange={(e) => patchSection("mnemopi", { scoping: e.target.value as NonNullable<NativeSettings["mnemopi"]>["scoping"] })}
-                      >
-                        <option value="per-project" style={nativeOptionStyle}>{t("settingsConfig.memoryScopePerProject")}</option>
-                        <option value="per-project-tagged" style={nativeOptionStyle}>{t("settingsConfig.memoryScopePerProjectTagged")}</option>
-                        <option value="global" style={nativeOptionStyle}>{t("settingsConfig.memoryScopeGlobal")}</option>
-                      </select>
-                    </NativeSetting>
-                    <NativeSetting searchId="recall-on-session-start" label={t("settingsConfig.recallOnSessionStart")} description={t("settingsConfig.recallOnSessionStartDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mnemopi?.autoRecall ?? true}
-                        onChange={(checked) => patchSection("mnemopi", { autoRecall: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="retain-completed-turns" label={t("settingsConfig.retainCompletedTurns")} description={t("settingsConfig.retainCompletedTurnsDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mnemopi?.autoRetain ?? true}
-                        onChange={(checked) => patchSection("mnemopi", { autoRetain: checked })}
-                      />
-                    </NativeSetting>
+                    <NativeSettingsFields controller={native} keys={["memory.backend", "autolearn.enabled", "autolearn.autoContinue", "autolearn.minToolCalls", "mnemopi.scoping", "mnemopi.autoRecall", "mnemopi.autoRetain", "mnemopi.noEmbeddings"]} />
                   </div>
                 </section>
 
@@ -1459,30 +1136,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <div className="settings-section-title" style={{ fontSize: 13.5, fontWeight: 600, margin: 0 }}>{t("settingsConfig.automaticRetry")}</div>
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12.5, lineHeight: 1.45 }}>{t("settingsConfig.automaticRetryDesc")}</p>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
-                    <NativeSetting searchId="automatic-retry" label={t("settingsConfig.retryToggle")} description={t("settingsConfig.retryToggleDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.retry?.enabled ?? true}
-                        onChange={(checked) => patchSection("retry", { enabled: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="max-attempts" label={t("settingsConfig.maxAttempts")} description={t("settingsConfig.maxAttemptsDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
-                        value={String(nativeSettings?.retry?.maxRetries ?? 2)}
-                        onChange={(e) => patchSection("retry", { maxRetries: Number(e.target.value) })}
-                      >
-                        {[0, 1, 2, 3, 4, 5].map((n) => (
-                          <option key={n} value={n} style={nativeOptionStyle}>{n}</option>
-                        ))}
-                      </select>
-                    </NativeSetting>
-                    <NativeSetting searchId="model-fallback" label={t("settingsConfig.modelFallback")} description={t("settingsConfig.modelFallbackDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.retry?.modelFallback ?? false}
-                        onChange={(checked) => patchSection("retry", { modelFallback: checked })}
-                      />
-                    </NativeSetting>
+                    <NativeSettingsFields controller={native} keys={["retry.enabled", "retry.maxRetries", "retry.modelFallback"]} />
                   </div>
+                </section>
+                <section style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--border)", paddingTop: 18, width: "100%" }}>
+                  <NativeSettingsFields controller={native} keys={["advisor.enabled", "advisor.subagents", "advisor.syncBacklog", "advisor.immuneTurns"]} />
                 </section>
               </div>
             )}
@@ -1497,24 +1155,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 </div>
                 {cwd && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                    <NativeSetting searchId="load-project-mcp-servers" label={t("settingsConfig.loadProjectMcp")} description={t("settingsConfig.loadProjectMcpDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mcp?.enableProjectConfig ?? true}
-                        onChange={(checked) => patchSection("mcp", { enableProjectConfig: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="render-mcp-markdown" label={t("settingsConfig.renderMcpMarkdown")} description={t("settingsConfig.renderMcpMarkdownDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mcp?.renderMarkdownResults ?? true}
-                        onChange={(checked) => patchSection("mcp", { renderMarkdownResults: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="mcp-resource-updates" label={t("settingsConfig.mcpResourceUpdates")} description={t("settingsConfig.mcpResourceUpdatesDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mcp?.notifications ?? false}
-                        onChange={(checked) => patchSection("mcp", { notifications: checked })}
-                      />
-                    </NativeSetting>
+                    <NativeSettingsFields controller={native} keys={["mcp.enableProjectConfig", "mcp.renderMarkdownResults", "mcp.notifications", "mcp.notificationDebounceMs"]} />
                   </div>
                 )}
                 <McpConfig cwd={cwd} sessionId={sessionId} />

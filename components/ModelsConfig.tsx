@@ -1060,7 +1060,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean }) {
+export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, cwd, sessionId }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean; cwd?: string; sessionId?: string }) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
   const [config, setConfig] = useState<ModelsFileData>({ providers: {} });
@@ -1108,7 +1108,10 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
   const loadRuntimeModels = useCallback(async () => {
     setRuntimeModelsLoading(true);
     try {
-      const response = await fetch("/api/models", { cache: "no-store" });
+      const params = new URLSearchParams();
+      if (cwd) params.set("cwd", cwd);
+      if (sessionId) params.set("sessionId", sessionId);
+      const response = await fetch(`/api/models${params.size ? `?${params}` : ""}`, { cache: "no-store" });
       const data = response.ok ? await response.json() as { modelList?: RuntimeModelEntry[]; connectedProviders?: ConnectedProvider[] } : null;
       setRuntimeModels(data?.modelList ?? []);
       setConnectedProviders(data?.connectedProviders ?? []);
@@ -1118,7 +1121,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     } finally {
       setRuntimeModelsLoading(false);
     }
-  }, []);
+  }, [cwd, sessionId]);
 
   const loadConfig = useCallback(() => {
     setLoading(true);
@@ -1346,8 +1349,8 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       return <ApiKeyDetail key={p.id} provider={p} />;
     }
     if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} />;
-    if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} onChanged={loadRuntimeModels} />;
-    if (selection.type === "fallbacks") return <RetryFallbackDetail models={runtimeModels} />;
+    if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} onChanged={loadRuntimeModels} cwd={cwd} sessionId={sessionId} />;
+    if (selection.type === "fallbacks") return <RetryFallbackDetail models={runtimeModels} cwd={cwd} sessionId={sessionId} />;
     if (selection.type === "picker") {
       const pickerQuery = composerPickerSearch.trim().toLowerCase();
       const matchesPicker = (model: RuntimeModelEntry) =>

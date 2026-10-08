@@ -96,6 +96,14 @@ export function disposeUtilityRpc(): void {
   if (proc) void proc.dispose();
 }
 
+/** Configuration writes invalidate the next registry process without interrupting
+ * an in-flight command or login. Read-only settings queries never call this. */
+export function invalidateUtilityRpc(): void {
+  const state = globalThis.__ompUtilityRpcState;
+  if (!state) return;
+  state.queue = state.queue.then(() => { disposeUtilityRpc(); });
+}
+
 function scheduleIdleKill(state: UtilityRpcState): void {
   if (state.idleTimer) clearTimeout(state.idleTimer);
   state.idleTimer = setTimeout(() => {

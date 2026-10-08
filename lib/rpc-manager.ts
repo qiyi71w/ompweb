@@ -5,7 +5,7 @@ import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
-import { readNativeSettings } from "./omp/settings-config";
+import { readPersistedExtensionApproval } from "./omp/settings-config";
 import { getAgentEnvOverrides } from "./omp/agent-env";
 import {
   cacheSessionPath,
@@ -886,7 +886,7 @@ export class AgentSessionWrapper {
     // prompts, including login/editor confirmations, remain interactive.
     let autoApproveExtension = false;
     try {
-      autoApproveExtension = readNativeSettings().settings.tools?.approval?.extension === "allow";
+      autoApproveExtension = readPersistedExtensionApproval() === "allow";
     } catch {
       // A malformed config must not prevent normal interactive approval.
     }
