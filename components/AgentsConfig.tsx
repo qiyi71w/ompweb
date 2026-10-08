@@ -319,7 +319,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
             ) : (
               filtered.map((a) => {
                 const isSelected = !creating && selected === a.name;
-                const dot = !a.valid ? "var(--status-error, #e5484d)" : a.enabled ? "var(--accent)" : "var(--border)";
+                const dot = !a.valid ? "var(--status-error, #e5484d)" : disabledAgents && !disabledAgents.includes(a.name) ? "var(--accent)" : "var(--border)";
                 const badgeBg = a.scope === "bundled" ? "var(--bg-subtle)" : "color-mix(in srgb, var(--accent) 12%, transparent)";
                 return (
                   <button key={a.name} className="agent-config-row" type="button" onClick={() => pick(a)} style={{ width: "100%", textAlign: "left", display: "flex", gap: 8, padding: "9px 10px", border: "none", borderLeft: isSelected ? "2px solid var(--accent)" : "2px solid transparent", background: isSelected ? "var(--bg-selected)" : "transparent", cursor: "pointer", alignItems: "flex-start" }}>
