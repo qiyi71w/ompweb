@@ -58,7 +58,7 @@ export interface SettingsWriteRequest {
 }
 
 interface SettingDescriptor {
-  type: "boolean" | "number" | "enum" | "array" | "record";
+  type: "boolean" | "number" | "enum" | "array" | "record" | "string";
   label: string;
   searchId?: string;
   values?: readonly string[];
@@ -85,6 +85,8 @@ export const NATIVE_SETTINGS_FIELDS: Record<string, SettingDescriptor> = {
   "tools.approval.extension": { type: "enum", label: "approvalPolicy", parent: "tools.approval", values: ["allow", "prompt", "deny"] },
   "skills.showStartupDiagnostics": { type: "boolean", label: "skillStartupNotices", searchId: "skill-startup-notices" },
   enabledModels: { type: "array", label: "enabledModels" },
+  enabledProviders: { type: "array", label: "enabledProviders" },
+  modelRoleStorage: { type: "enum", label: "modelRoleStorage", values: ["global", "project"] },
   disabledProviders: { type: "array", label: "disabledProviders" },
   modelProviderOrder: { type: "array", label: "modelProviderOrder" },
   "retry.enabled": { type: "boolean", label: "retryToggle", searchId: "automatic-retry" },
@@ -119,9 +121,16 @@ export const NATIVE_SETTINGS_FIELDS: Record<string, SettingDescriptor> = {
 };
 
 export const APPROVAL_KEY_PREFIX = "tools.approval.";
+export const MODEL_ROLE_PREFIX = "modelRoles.";
+export const NATIVE_MODEL_ROLE_NAMES = ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"];
 
-/** Only the native approval dictionary is open-ended; ordinary fields stay finite. */
+/** Only native literal dictionaries are open-ended; ordinary fields stay finite. */
 export function getNativeSettingDescriptor(key: string): SettingDescriptor | undefined {
+  if (key.startsWith(MODEL_ROLE_PREFIX)) {
+    const name = key.slice(MODEL_ROLE_PREFIX.length);
+    if (!name.length || /[\u0000-\u001f\u007f]/.test(name)) return undefined;
+    return { type: "string", label: "modelRole", parent: "modelRoles" };
+  }
   if (key.startsWith(APPROVAL_KEY_PREFIX)) {
     const name = key.slice(APPROVAL_KEY_PREFIX.length);
     if (!name.length || /[\u0000-\u001f\u007f]/.test(name)) return undefined;

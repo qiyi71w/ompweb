@@ -1,6 +1,5 @@
 import { homedir } from "os";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 
@@ -168,7 +167,8 @@ export async function GET(
         const ready = await child.waitReady(READY_TIMEOUT_MS);
         await child.negotiateProtocol(ready);
         await child.sendCommand({ type: "login", providerId: provider }, LOGIN_TIMEOUT_MS);
-        enableProvider(provider);
+        // Authentication does not overwrite registry filters. Re-enable through
+        // the explicit scoped Models action, carrying its displayed baseline.
         invalidateModelsCache();
         disposeUtilityRpc();
         send({ type: "success" });

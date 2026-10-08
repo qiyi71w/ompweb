@@ -56,7 +56,9 @@ function FieldEditor({ controller, field }: { controller: NativeSettingsControll
   const label = field.policyKey ?? t(`settingsConfig.${descriptor.label}`);
   const persist = (next: unknown) => { void controller.set(field.key, next); };
   let editor;
-  if (field.key === "compaction.methodOrder") {
+  if (field.saved.redacted) {
+    editor = null;
+  } else if (field.key === "compaction.methodOrder") {
     const order = isCompactionMethodOrder(value) ? value : [];
     const methods = [...order, ...COMPACTION_METHODS.filter((method) => !order.includes(method))];
     const move = (index: number, delta: number) => {

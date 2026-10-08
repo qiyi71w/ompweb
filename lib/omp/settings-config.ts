@@ -8,7 +8,7 @@ import { isRecord } from "../type-guards";
 import { isCompactionMethodOrder } from "../compaction-methods";
 import { assertSettingsTarget, settingsPathIn, type OmpConfigurationContext } from "./configuration-context";
 import { wrapWindowsScript } from "./omp-cli";
-import { APPROVAL_KEY_PREFIX, getNativeSettingDescriptor, NATIVE_SETTINGS_FIELDS, type NativeSettingsView, type NativeSettingView, type SavedSetting, type SettingValue, type SettingsScope, type SettingsWriteRequest } from "./settings-contract";
+import { APPROVAL_KEY_PREFIX, MODEL_ROLE_PREFIX, NATIVE_MODEL_ROLE_NAMES, getNativeSettingDescriptor, NATIVE_SETTINGS_FIELDS, type NativeSettingsView, type NativeSettingView, type SavedSetting, type SettingValue, type SettingsScope, type SettingsWriteRequest } from "./settings-contract";
 import { configurationBaseline, sameConfigurationBaseline as sameToken, serializedConfigurationWrite as serialized, replaceConfigurationFile } from "./configuration-file";
 
 export { resolveConfigurationContext } from "./configuration-context";
@@ -35,6 +35,7 @@ function targetPath(context: OmpConfigurationContext, scope: SettingsScope): str
 }
 
 function settingPath(key: string): string[] {
+  if (key.startsWith(MODEL_ROLE_PREFIX)) return ["modelRoles", key.slice(MODEL_ROLE_PREFIX.length)];
   return key.startsWith(APPROVAL_KEY_PREFIX) ? ["tools", "approval", key.slice(APPROVAL_KEY_PREFIX.length)] : key.split(".");
 }
 
@@ -51,11 +52,11 @@ function locations(data: unknown, key: string) {
   const nested = ownPath(data, key);
   // Native dictionary members are literal. Top-level dotted configuration is
   // preserved, not silently migrated into a working native permission grant.
-  const approval = key.startsWith(APPROVAL_KEY_PREFIX);
+  const approval = key.startsWith(APPROVAL_KEY_PREFIX) || key.startsWith(MODEL_ROLE_PREFIX);
   const dotted = !approval && isRecord(data) && Object.hasOwn(data, key) && key.includes(".") ? { exists: true, value: data[key] } : { exists: false };
   const tools = ownPath(data, "tools");
   const dictionary = ownPath(data, "tools.approval");
-  const obstruction = approval ? [tools, dictionary].filter((part) => part.exists && !isRecord(part.value)) : [];
+  const obstruction = key.startsWith(MODEL_ROLE_PREFIX) ? [ownPath(data, "modelRoles")].filter((part) => part.exists && !isRecord(part.value)) : approval ? [tools, dictionary].filter((part) => part.exists && !isRecord(part.value)) : [];
   const legacy = key === "compaction.methodOrder" ? ["compaction.strategy", "compaction.remoteEnabled"].map((alias) => ({ nested: ownPath(data, alias), dotted: isRecord(data) && Object.hasOwn(data, alias) ? { exists: true, value: data[alias] } : { exists: false } })) : [];
   return { nested, dotted, legacy, obstruction };
 }
@@ -68,6 +69,7 @@ function fitsShape(key: string, value: unknown, allowUnknownEnum = false): boole
   const descriptor = getNativeSettingDescriptor(key);
   if (!descriptor) return false;
   switch (descriptor.type) {
+    case "string": return typeof value === "string" && !!value.trim();
     case "boolean": return typeof value === "boolean";
     case "number": return typeof value === "number" && Number.isFinite(value);
     case "enum": return typeof value === "string" && (allowUnknownEnum || descriptor.values?.includes(value) === true);
@@ -105,19 +107,24 @@ export async function readNativeAgentSettings(context: OmpConfigurationContext):
 }
 
 /** A fresh native process is intentional: no utility/session cache or fabricated defaults. */
-export async function readNativeSettings(context: OmpConfigurationContext, scope: SettingsScope = "global", approvalKeys: string[] = []): Promise<NativeSettingsView> {
+export async function readNativeSettings(context: OmpConfigurationContext, scope: SettingsScope = "global", approvalKeys: string[] = [], roleKeys: string[] = []): Promise<NativeSettingsView> {
   for (const name of approvalKeys) if (!getNativeSettingDescriptor(`${APPROVAL_KEY_PREFIX}${name}`)) throw new Error("Invalid approval policy key");
+  for (const name of roleKeys) if (!getNativeSettingDescriptor(`${MODEL_ROLE_PREFIX}${name}`)) throw new Error("Invalid model role");
   const path = targetPath(context, scope);
   let data: unknown = {};
   let capability: NativeSettingsView["capability"] = { available: false, reason: context.view.binary ? "query-failed" : "binary-unavailable" };
   let entries: Record<string, NativeEntry> = {};
+  let globalData: unknown = {};
   try {
     assertSettingsTarget(context, scope, path);
     const doc = readDocument(path);
     data = doc.toJS({ maxAliasCount: 100 }) ?? {};
     // Preflight both layers/overlays: native startup may quarantine invalid YAML.
     // A Web read must not trigger that destructive native recovery path.
-    for (const file of [targetPath(context, "global"), targetPath(context, "project"), ...context.view.launch.configFiles]) readDocument(file).toJS({ maxAliasCount: 100 });
+    for (const file of [targetPath(context, "global"), targetPath(context, "project"), ...context.view.launch.configFiles]) {
+      const layer = readDocument(file).toJS({ maxAliasCount: 100 });
+      if (file === targetPath(context, "global")) globalData = layer;
+    }
   } catch {
     capability = { available: false, reason: "invalid-yaml" };
   }
@@ -133,19 +140,25 @@ export async function readNativeSettings(context: OmpConfigurationContext, scope
     for (const name of Object.keys(policies)) if (getNativeSettingDescriptor(`${APPROVAL_KEY_PREFIX}${name}`)) keys.add(`${APPROVAL_KEY_PREFIX}${name}`);
   }
   for (const name of approvalKeys) keys.add(`${APPROVAL_KEY_PREFIX}${name}`);
+  for (const name of [...NATIVE_MODEL_ROLE_NAMES, ...roleKeys]) keys.add(`${MODEL_ROLE_PREFIX}${name}`);
+  for (const roles of [ownPath(data, "modelRoles").value, entries.modelRoles?.value]) if (isRecord(roles)) {
+    for (const name of Object.keys(roles)) if (getNativeSettingDescriptor(`${MODEL_ROLE_PREFIX}${name}`)) keys.add(`${MODEL_ROLE_PREFIX}${name}`);
+  }
   for (const key of keys) {
     const descriptor = getNativeSettingDescriptor(key)!;
     const saved = savedSetting(context, scope, key, data);
     const registration = entries[descriptor.parent ?? key];
     const supported = !!registration && registration.type === (descriptor.parent ? "record" : descriptor.type);
     const policyKey = descriptor.parent === "tools.approval" ? key.slice(APPROVAL_KEY_PREFIX.length) : undefined;
-    const rawValue = policyKey !== undefined ? { exists: isRecord(registration?.value) && Object.hasOwn(registration.value, policyKey), value: isRecord(registration?.value) && Object.hasOwn(registration.value, policyKey) ? registration.value[policyKey] : undefined } : { exists: !!registration && Object.hasOwn(registration, "value"), value: registration?.value };
+    const member = descriptor.parent ? key.slice(descriptor.parent.length + 1) : undefined;
+    const rawValue = member !== undefined ? { exists: isRecord(registration?.value) && Object.hasOwn(registration.value, member), value: isRecord(registration?.value) ? registration.value[member] : undefined } : { exists: !!registration && Object.hasOwn(registration, "value"), value: registration?.value };
     const native: SettingValue = { known: supported && rawValue.exists && !registration?.redacted, ...(supported && rawValue.exists ? fitsShape(key, rawValue.value, true) ? { value: rawValue.value } : { redacted: true } : {}) };
     if (native.redacted) native.known = false;
     const unknownEnum = descriptor.type === "enum" && ((saved.exists && typeof saved.value === "string" && !descriptor.values?.includes(saved.value)) || (typeof native.value === "string" && !descriptor.values?.includes(native.value)));
-    const complex = saved.redacted || native.redacted || locations(data, key).obstruction.length > 0 || (policyKey !== undefined && supported && (registration.redacted || !isRecord(registration.value)));
+    const inheritedFilter = scope === "project" && !saved.exists && ["enabledModels", "enabledProviders", "disabledProviders"].includes(key) ? savedSetting(context, "global", key, globalData) : undefined;
+    const complex = saved.redacted || inheritedFilter?.redacted || native.redacted || locations(data, key).obstruction.length > 0 || (member !== undefined && supported && (registration.redacted || !isRecord(registration.value)));
     const reason = !capability.available ? "query-failed" : unsupportedTarget ? "project-yaml-unsupported" : !registration ? "unregistered" : !supported ? "type-mismatch" : descriptor.readOnly ? "constraint-only" : complex ? "complex-value" : unknownEnum ? "unknown-enum" : undefined;
-    fields[key] = { key, ...(policyKey !== undefined ? { policyKey } : {}), supported, editable: reason === undefined, canUnset: supported && !descriptor.readOnly && !unsupportedTarget && capability.available && (saved.exists || saved.legacyOverride === true) && !complex, ...(reason ? { reason } : {}), saved, native, effective: context.unknownEffectiveKeys.has("*") || context.unknownEffectiveKeys.has(key) || (policyKey !== undefined && context.unknownEffectiveKeys.has("tools.approval")) ? { known: false } : native, application: descriptor.application ?? "new-session", type: descriptor.type };
+    fields[key] = { key, ...(policyKey !== undefined ? { policyKey } : {}), supported, editable: reason === undefined, canUnset: supported && !descriptor.readOnly && !unsupportedTarget && capability.available && (saved.exists || saved.legacyOverride === true) && !complex, ...(reason ? { reason } : {}), saved, native, effective: context.unknownEffectiveKeys.has("*") || context.unknownEffectiveKeys.has(key) || (descriptor.parent !== undefined && context.unknownEffectiveKeys.has(descriptor.parent)) ? { known: false } : native, application: descriptor.application ?? "new-session", type: descriptor.type };
   }
   return { context: context.view, scope, path, capability, fields };
 }
@@ -172,9 +185,10 @@ export async function writeNativeSettings(context: OmpConfigurationContext, requ
   validateSettingsWriteRequest(request);
   const scope = request.scope;
   const approvalKeys = request.operations.filter(({ key }) => key.startsWith(APPROVAL_KEY_PREFIX)).map(({ key }) => key.slice(APPROVAL_KEY_PREFIX.length));
+  const roleKeys = request.operations.filter(({ key }) => key.startsWith(MODEL_ROLE_PREFIX)).map(({ key }) => key.slice(MODEL_ROLE_PREFIX.length));
   const lockKey = targetPath(context, scope);
   return serialized(lockKey, async () => {
-    const view = await readNativeSettings(context, scope, approvalKeys);
+    const view = await readNativeSettings(context, scope, approvalKeys, roleKeys);
     if (request.contextId !== context.view.id) throw new SettingsConflictError(view, request.operations.map(({ key }) => key));
     if (!view.capability.available) throw new Error("Native configuration is read-only");
     const conflicts = request.operations.filter(({ key, baseline }) => {
@@ -193,15 +207,15 @@ export async function writeNativeSettings(context: OmpConfigurationContext, requ
     // Recheck after the native query, which can itself perform legacy migrations.
     const data = doc.toJS({ maxAliasCount: 100 }) ?? {};
     const changed = request.operations.filter(({ key, baseline }) => !sameToken(baseline.token, token(context, scope, key, data))).map(({ key }) => key);
-    if (changed.length) throw new SettingsConflictError(await readNativeSettings(context, scope, approvalKeys), changed);
+    if (changed.length) throw new SettingsConflictError(await readNativeSettings(context, scope, approvalKeys, roleKeys), changed);
     for (const { key, op, value } of request.operations) {
-      if (!key.startsWith(APPROVAL_KEY_PREFIX) && key.includes(".") && isMap(doc.contents)) doc.delete(key);
+      if (!key.startsWith(APPROVAL_KEY_PREFIX) && !key.startsWith(MODEL_ROLE_PREFIX) && key.includes(".") && isMap(doc.contents)) doc.delete(key);
       if (op === "unset") {
         doc.deleteIn(settingPath(key));
         if (key === "compaction.methodOrder") for (const alias of ["compaction.strategy", "compaction.remoteEnabled"]) { doc.delete(alias); doc.deleteIn(alias.split(".")); }
       } else doc.setIn(settingPath(key), value);
     }
     replaceConfigurationFile(path, doc.toString());
-    return { ...await readNativeSettings(context, scope, approvalKeys), persistence: { saved: true, appliedToRunningSessions: false } };
+    return { ...await readNativeSettings(context, scope, approvalKeys, roleKeys), persistence: { saved: true, appliedToRunningSessions: false } };
   });
 }

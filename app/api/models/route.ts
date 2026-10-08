@@ -102,7 +102,7 @@ async function loadModels(): Promise<ModelsData> {
       && typeof (provider as { authenticated?: unknown }).authenticated === "boolean"
     ))
     : [];
-  const disabledProviders = readDisabledProviders();
+  const disabledProviders = await readDisabledProviders();
   const connectedProviders = loginProviders
     .filter((provider) => provider.authenticated)
     .map((provider) => ({ id: provider.id, name: provider.name, disabled: disabledProviders.has(provider.id) }));

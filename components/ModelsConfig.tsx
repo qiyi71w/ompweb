@@ -6,6 +6,10 @@ import { useI18n } from "@/lib/i18n";
 import { isSafeExternalUrl } from "@/lib/safe-url";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
 import { formatApiError } from "@/lib/i18n/api-error";
+import { modelEditOperations, type ModelRename } from "@/lib/models-config-operations";
+import type { ModelsConfigurationView } from "@/lib/omp/models-contract";
+import { NATIVE_SETTINGS_CHANGED_EVENT, useNativeSettings } from "@/hooks/useNativeSettings";
+import { NativeSettingsFields, NativeSettingsScopeBar } from "./NativeSettingsFields";
 import {
   DialogTitle,
 } from "@/components/ui/primitives";
@@ -83,10 +87,6 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
   useEffect(() => setEditingName(name), [name]);
   const set = <K extends keyof ProviderEntry>(k: K, v: ProviderEntry[K]) => onChange({ ...provider, [k]: v });
 
-  useEffect(() => {
-    if (!provider.api) onChange({ ...provider, api: "openai-completions" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider.api]);
 
   const renameValidate = () => {
     if (!editingName.trim()) return t("modelsConfig.errorNameRequired");
@@ -109,7 +109,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
 
   const apiKeyValidate = () => {
     if (provider.auth === "none") return null;
-    if (!provider.apiKey || !provider.apiKey.trim()) return t("modelsConfig.errorApiKeyRequired");
+    if (provider.apiKey === "") return t("modelsConfig.errorApiKeyRequired");
     return null;
   };
   const apiKeyV = useFieldValidation(apiKeyValidate);
@@ -238,7 +238,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
         >
           <SecretInput
             value={provider.apiKey ?? ""}
-            onChange={(v) => { set("apiKey", v || undefined); apiKeyV.onChange(); }}
+            onChange={(v) => { set("apiKey", v); apiKeyV.onChange(); }}
             placeholder={t("modelsConfig.apiKeyPlaceholder")}
             invalid={Boolean(apiKeyV.error)}
             error={apiKeyV.error}
@@ -246,6 +246,10 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
             showLabel={t("modelsConfig.showApiKey")}
             hideLabel={t("modelsConfig.hideApiKey")}
           />
+          <p style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("modelsConfig.credentialPreserved")}</p>
+          <p role="status">{t(provider.apiKey === undefined ? "modelsConfig.credentialPreserve" : provider.apiKey === "" ? "modelsConfig.credentialClear" : "modelsConfig.credentialReplace")}</p>
+          <button type="button" aria-pressed={provider.apiKey === undefined} className="settings-back ui-focus-ring" onClick={() => set("apiKey", undefined)}>{t("modelsConfig.credentialPreserve")}</button>
+          <button type="button" aria-pressed={provider.apiKey === ""} className="settings-back ui-focus-ring" onClick={() => set("apiKey", "")}>{t("modelsConfig.credentialClear")}</button>
         </FormField>
 
         <FormCheck
@@ -344,11 +348,7 @@ function ThinkingEditor({
       if (entry === "omit") delete map[level];
       else map[level] = entry;
     }
-    const ordered = THINKING_LEVELS.filter((l) => included.has(l));
-    if (ordered.length === 0 || (ordered.length === THINKING_LEVELS.length && Object.keys(map).length === 0)) {
-      onChange(undefined);
-      return;
-    }
+    const ordered = [...included];
     onChange({
       ...(value ?? {}),
       mode: value?.mode ?? "effort",
@@ -473,12 +473,14 @@ function ModelDetail({
   provider,
   model,
   onChange,
+  testContext,
   onDelete,
 }: {
   providerName: string;
   provider: ProviderEntry;
   model: ModelEntry;
   onChange: (m: ModelEntry) => void;
+  testContext: { url: string; contextId?: string; savedProvider: string; credentials?: Record<string, string>; savedModel?: string; modelHeaderBaseline?: string };
   onDelete: () => void;
 }) {
   const { t } = useI18n();
@@ -513,10 +515,10 @@ function ModelDetail({
     if (!model.id.trim() || testState.phase === "testing") return;
     setTestState({ phase: "testing" });
     try {
-      const res = await fetch("/api/models-config/test", {
+      const res = await fetch(testContext.url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerName, provider, model }),
+        body: JSON.stringify({ providerName, provider, model, contextId: testContext.contextId, savedProvider: testContext.savedProvider, credentials: testContext.credentials, savedModel: testContext.savedModel, modelHeaderBaseline: testContext.modelHeaderBaseline }),
       });
       const d = await res.json() as {
         ok?: boolean;
@@ -544,7 +546,7 @@ function ModelDetail({
     } catch (e) {
       setTestState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
-  }, [model, provider, providerName, testState.phase]);
+  }, [model, provider, providerName, testState.phase, testContext]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -1063,7 +1065,16 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, cwd, sessionId }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean; cwd?: string; sessionId?: string }) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
+  const providerSettings = useNativeSettings(cwd, sessionId);
   const [config, setConfig] = useState<ModelsFileData>({ providers: {} });
+  const [originalView, setOriginalView] = useState<ModelsConfigurationView | null>(null);
+  const [conflicted, setConflicted] = useState(false);
+  const renames = useRef<ModelRename[]>([]);
+  const loadGeneration = useRef(0);
+  const params = new URLSearchParams();
+  if (cwd) params.set("cwd", cwd);
+  if (sessionId) params.set("sessionId", sessionId);
+  const modelsUrl = `/api/models-config?${params}`;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1124,25 +1135,26 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   }, [cwd, sessionId]);
 
   const loadConfig = useCallback(() => {
+    const generation = ++loadGeneration.current;
     setLoading(true);
-    fetch("/api/models-config")
-      .then((r) => r.json())
-      .then((d: ModelsFileData & { parseError?: string; code?: string; path?: string }) => {
-        if (d.parseError) {
-          setParseError({ message: d.parseError, path: d.path });
-          setConfig({ providers: {} });
-          setSelection(null);
-          return;
-        }
-        setParseError(null);
-        const normalized = d.providers ? d : { ...d, providers: {} };
-        setConfig(normalized);
-        const keys = Object.keys(normalized.providers ?? {});
+    setOriginalView(null);
+    fetch(modelsUrl, { cache: "no-store" })
+      .then(async (response) => { if (!response.ok) throw new Error("read-failed"); return await response.json() as ModelsConfigurationView; })
+      .then((view) => {
+        if (generation !== loadGeneration.current) return;
+        setOriginalView(view);
+        setConflicted(false);
+        setSaveError(null);
+        renames.current = [];
+        setParseError(view.parseError ? { message: view.parseError, path: view.path } : null);
+        const next = view.config as ModelsFileData;
+        setConfig(next);
+        const keys = Object.keys(next.providers ?? {});
         if (!embedded && keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
-      .catch(() => setConfig({ providers: {} }))
-      .finally(() => setLoading(false));
-  }, [embedded]);
+      .catch(() => { if (generation === loadGeneration.current) { setOriginalView(null); setSaveError("read-failed"); } })
+      .finally(() => { if (generation === loadGeneration.current) setLoading(false); });
+  }, [embedded, modelsUrl]);
 
   useEffect(() => {
     loadConfig();
@@ -1193,11 +1205,13 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
 
 
   const enableConnectedProvider = useCallback(async (provider: string) => {
-    const response = await fetch("/api/providers/enable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });
-    const data = await response.json() as { error?: string };
-    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    const field = providerSettings.view?.fields.disabledProviders;
+    if (!field?.editable) throw new Error(t(`nativeSettings.reason.${field?.reason ?? "query-failed"}`));
+    if (!field.saved.exists) throw new Error(t("modelsConfig.enableAtSource"));
+    if (!Array.isArray(field.saved.value) || !field.saved.value.every((entry) => typeof entry === "string")) throw new Error(t("nativeSettings.reason.complex-value"));
+    if (!await providerSettings.set("disabledProviders", field.saved.value.filter((entry) => entry !== provider))) throw new Error(t("nativeSettings.requestFailed"));
     await loadRuntimeModels();
-  }, [loadRuntimeModels]);
+  }, [providerSettings, loadRuntimeModels, t]);
 
   const addCustomProvider = useCallback(() => {
     let finalName = "new-provider";
@@ -1212,6 +1226,8 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   }, []);
 
   const renameProvider = useCallback((oldName: string, newName: string) => {
+    if (!newName.trim() || (oldName !== newName && config.providers?.[newName])) return;
+    renames.current.push({ provider: oldName, from: oldName, to: newName, model: false });
     setConfig((prev) => {
       const entries = Object.entries(prev.providers ?? {});
       const idx = entries.findIndex(([k]) => k === oldName);
@@ -1225,7 +1241,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
       if (prev.type === "model" && prev.providerName === oldName) return { ...prev, providerName: newName };
       return prev;
     });
-  }, []);
+  }, [config.providers]);
 
   const deleteProvider = useCallback((name: string) => {
     setConfig((prev) => {
@@ -1270,13 +1286,15 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   }, []);
 
   const updateModel = useCallback((providerName: string, index: number, m: ModelEntry) => {
+    const previous = config.providers?.[providerName]?.models?.[index];
+    if (previous && previous.id !== m.id) renames.current.push({ provider: providerName, from: previous.id, to: m.id, model: true });
     setConfig((prev) => {
       const provider = prev.providers?.[providerName] ?? {};
       const models = [...(provider.models ?? [])];
       models[index] = m;
       return { ...prev, providers: { ...(prev.providers ?? {}), [providerName]: { ...provider, models } } };
     });
-  }, []);
+  }, [config.providers]);
 
   const removeModel = useCallback((providerName: string, index: number) => {
     setConfig((prev) => {
@@ -1289,20 +1307,23 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   }, []);
 
   const handleSave = useCallback(async () => {
-    if (parseError) return;
+    if (parseError || !originalView || conflicted) return;
+    const generation = loadGeneration.current;
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);
     try {
       const saveableConfig = omitUntouchedModelDrafts(config);
-      const res = await fetch("/api/models-config", {
+      const res = await fetch(modelsUrl, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(saveableConfig),
+        body: JSON.stringify({ contextId: originalView.context.id, scope: "global", operations: modelEditOperations(originalView, saveableConfig, renames.current) }),
       });
       const d = await res.json() as { success?: boolean; error?: string; code?: string };
+      if (generation !== loadGeneration.current) return;
       if (!res.ok || d.error) {
-        const msg = d.error || d.code ? formatApiError(d) : `HTTP ${res.status}`;
+        const msg = res.status === 409 && d.code === "conflict" ? t("nativeSettings.conflict") : d.error || d.code ? formatApiError(d) : `HTTP ${res.status}`;
+        if (res.status === 409 && d.code === "conflict") setConflicted(true);
         setSaveError(msg);
         toast.error(t("modelsConfig.saveErrorTitle"), msg);
         // The file became unparseable after it was loaded — the server refused
@@ -1311,21 +1332,23 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
       } else {
         // Drop a transient empty model row after its provider edit is persisted.
         loadConfig();
-        await loadRuntimeModels();
+        void loadRuntimeModels();
         loadApiKeyProviders();
+        window.dispatchEvent(new Event(NATIVE_SETTINGS_CHANGED_EVENT));
         onSaved?.();
         setSavedOk(true);
         setTimeout(() => setSavedOk(false), 2000);
         toast.success(t("modelsConfig.saveSuccessTitle"));
       }
     } catch (e) {
+      if (generation !== loadGeneration.current) return;
       const msg = e instanceof Error ? e.message : String(e);
       setSaveError(msg);
       toast.error(t("modelsConfig.saveErrorTitle"), msg);
     } finally {
       setSaving(false);
     }
-  }, [config, loadApiKeyProviders, loadConfig, loadRuntimeModels, onSaved, parseError, t]);
+  }, [config, originalView, conflicted, modelsUrl, loadApiKeyProviders, loadConfig, loadRuntimeModels, onSaved, parseError, t]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
@@ -1348,7 +1371,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
       if (!p) return null;
       return <ApiKeyDetail key={p.id} provider={p} />;
     }
-    if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} />;
+    if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} cwd={cwd} sessionId={sessionId} />;
     if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} onChanged={loadRuntimeModels} cwd={cwd} sessionId={sessionId} />;
     if (selection.type === "fallbacks") return <RetryFallbackDetail models={runtimeModels} cwd={cwd} sessionId={sessionId} />;
     if (selection.type === "picker") {
@@ -1391,6 +1414,8 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
               )}
             </label>
           </div>
+          <NativeSettingsScopeBar controller={providerSettings} workspace={!!cwd} />
+          <NativeSettingsFields controller={providerSettings} keys={["disabledProviders"]} />
           {runtimeModelsLoading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.loadingRuntimeModels")}</div> : filteredProviders.length === 0 ? (
             <div style={{ padding: "24px 16px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text-dim)", fontSize: 12, textAlign: "center" }}>
               {pickerQuery ? t("modelsConfig.noModelsMatch", { query: composerPickerSearch }) : t("modelsConfig.noReportedModels")}
@@ -1443,12 +1468,20 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
     const provider = config.providers?.[selection.providerName];
     const model = provider?.models?.[selection.index];
     if (!model) return null;
+    let savedProvider = selection.providerName;
+    let savedModel = model.id;
+    for (const rename of [...renames.current].reverse()) {
+      if (!rename.model && rename.to === savedProvider) savedProvider = rename.from;
+      else if (rename.model && rename.provider === savedProvider && rename.to === savedModel) savedModel = rename.from;
+    }
+    const credentials = originalView?.entities[savedProvider]?.fields;
     return (
       <ModelDetail
         key={`${selection.providerName}-${selection.index}`}
         providerName={selection.providerName}
         provider={provider}
         model={model}
+        testContext={{ url: `/api/models-config/test?${params}`, contextId: originalView?.context.id, savedProvider, credentials: credentials ? { apiKey: credentials.apiKey.token, headers: credentials.headers.token } : undefined, savedModel, modelHeaderBaseline: originalView?.entities[savedProvider]?.models?.[savedModel]?.fields.headers.token }}
         onChange={(m) => updateModel(selection.providerName, selection.index, m)}
         onDelete={() => removeModel(selection.providerName, selection.index)}
       />
@@ -1463,7 +1496,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
         {!embedded && (<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
             <DialogTitle style={{ fontSize: 16, margin: 0 }}>{t("modelsConfig.title")}</DialogTitle>
-            <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>~/.omp/agent/models.yml</code>
+            <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{originalView?.path}</code>
           </div>
           <button onClick={onClose} aria-label={t("modelsConfig.close")} title={t("modelsConfig.close")} className="ui-focus-ring" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "4px 8px", minWidth: "var(--control-height-sm)", minHeight: "var(--control-height-sm)", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "var(--radius-control)" }}>×</button>
         </div>)}
@@ -1815,7 +1848,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
                     <div style={{ flex: "1 1 220px", minWidth: 0, overflowWrap: "anywhere" }}>
                       <div style={{ fontSize: "var(--text-md)", fontWeight: 600, color: "var(--text)" }}>{t("modelsConfig.customProviders")}</div>
                       <div style={{ fontSize: "var(--text-body)", color: "var(--text-muted)", marginTop: 3 }}>
-                        Custom endpoints, local Ollama / vLLM models, or reverse proxies defined in <code style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>~/.omp/agent/models.yml</code>.
+                        <code style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", overflowWrap: "anywhere" }}>{originalView?.path}</code>
                       </div>
                     </div>
                     <button
@@ -2001,7 +2034,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
               <button onClick={() => loadConfig()} disabled={loading} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12.5 }}>
                 {t("modelsConfig.cancel")}
               </button>
-              <button onClick={handleSave} disabled={saving || savedOk || parseError !== null} style={{
+              <button onClick={handleSave} disabled={saving || savedOk || parseError !== null || !originalView || conflicted} style={{
                 position: "relative",
                 padding: "6px 18px",
                 minWidth: 92,

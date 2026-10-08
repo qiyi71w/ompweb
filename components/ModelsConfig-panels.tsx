@@ -4,6 +4,9 @@ import { useState, useEffect, useRef, type CSSProperties } from "react";
 import { useI18n } from "@/lib/i18n";
 import { useNativeSettings } from "@/hooks/useNativeSettings";
 import { isRecord } from "@/lib/type-guards";
+import { MODEL_ROLE_PREFIX, type NativeSettingView } from "@/lib/omp/settings-contract";
+import type { NativeSettingsController } from "@/hooks/useNativeSettings";
+import { splitModelThinking } from "@/lib/model-selector";
 import { NativeSettingState, NativeSettingsFields, NativeSettingsScopeBar } from "./NativeSettingsFields";
 import {
   Dialog,
@@ -11,7 +14,6 @@ import {
   DialogTitle,
 } from "@/components/ui/primitives";
 import { Plus, Trash2, ArrowDown, ArrowUp } from "lucide-react";
-import { toast } from "@/components/ui/toast";
 import {
   NATIVE_MODEL_ROLES,
   providerInitials,
@@ -126,7 +128,7 @@ export function RetryFallbackDetail({ models, cwd, sessionId }: { models: Runtim
 export function NativeRegistryDetail({ models, connectedProviders, onChanged, cwd, sessionId }: { models: RuntimeModelEntry[]; connectedProviders: ConnectedProvider[]; onChanged: () => Promise<void>; cwd?: string | null; sessionId?: string | null }) {
   const { t } = useI18n();
   const native = useNativeSettings(cwd, sessionId);
-  const keys = ["enabledModels", "disabledProviders", "modelProviderOrder"];
+  const keys = ["enabledModels", "enabledProviders", "disabledProviders", "modelProviderOrder"];
   const list = (key: string): string[] => {
     const field = native.view?.fields[key];
     const value = field?.saved.exists ? field.saved.value : field?.effective.value;
@@ -156,6 +158,7 @@ export function NativeRegistryDetail({ models, connectedProviders, onChanged, cw
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
     <NativeSettingsScopeBar controller={native} workspace={!!cwd} />
     <div><SectionTitle>{t("modelsConfig.nativeRegistryTitle")}</SectionTitle><p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.nativeRegistryDesc")}</p></div>
+    <NativeSettingsFields controller={native} keys={["enabledProviders"]} />
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
       <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}><input type="checkbox" checked={allowListEnabled} disabled={disabled} onChange={(event) => void save("enabledModels", event.target.checked ? allModelKeys : [])} /> {t("modelsConfig.restrictSelectedModels")}</label>
       {state("enabledModels")}
@@ -179,79 +182,51 @@ export function NativeRegistryDetail({ models, connectedProviders, onChanged, cw
     </section>
   </div>;
 }
-export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
+export function ModelRolesDetail({ models, cwd, sessionId }: { models: RuntimeModelEntry[]; cwd?: string; sessionId?: string }) {
   const { t } = useI18n();
-  const [roles, setRoles] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+  const native = useNativeSettings(cwd, sessionId);
+  const initialized = useRef<string | null>(null);
   useEffect(() => {
-    fetch("/api/model-roles")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { roles?: Record<string, string> }) => setRoles(data.roles ?? {}))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-      .finally(() => setLoading(false));
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const response = await fetch("/api/model-roles", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles }) });
-      const data = await response.json() as { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      toast.success(t("modelsConfig.rolesSaved"));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const updateRoleModel = (role: string, modelValue: string) => {
-    const current = roles[role] ?? "";
-    const effort = current.match(/:([^,:]+)$/)?.[1] ?? "";
-    setRoles((values) => ({ ...values, [role]: modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "" }));
-  };
-
-  const updateRoleThinking = (role: string, effort: string) => {
-    const current = roles[role] ?? "";
-    const modelValue = current.replace(/:([^,:]+)$/, "");
-    setRoles((values) => ({ ...values, [role]: modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "" }));
-  };
-
+    if (!native.view || initialized.current === native.view.context.id) return;
+    initialized.current = native.view.context.id;
+    if (cwd && native.view.fields.modelRoleStorage?.effective.value === "project") native.setScope("project");
+  }, [native, cwd]);
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-    <div>
-      <SectionTitle>{t("modelsConfig.modelRolesTitle")}</SectionTitle>
-      <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{t("modelsConfig.modelRolesDesc")}</p>
-    </div>
-    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.loadingRoles")}</div> : NATIVE_MODEL_ROLES.map((role) => (
-      <div key={role} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "82px minmax(0, 1fr) minmax(110px, 0.35fr)", alignItems: "center", gap: 10, fontSize: 12 }}>
-        <code style={{ color: "var(--text-muted)" }}>{role}</code>
-        {(() => {
-          const raw = roles[role] ?? "";
-          const selectedModel = raw.replace(/:([^,:]+)$/, "");
-          const selectedThinking = raw.match(/:([^,:]+)$/)?.[1] ?? "";
-          const model = models.find((item) => `${item.provider}/${item.id}` === selectedModel);
-          const modelKnown = !selectedModel || Boolean(model);
-          return <>
-            <select aria-label={`Model override for ${role}`} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
-              <option value="">{t("modelsConfig.noOverride")}</option>
-              {!modelKnown && <option value={selectedModel}>{selectedModel} (not currently available)</option>}
-              {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
-            </select>
-            <select aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
-              <option value="">{t("modelsConfig.modelDefault")}</option>
-              {(model?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level}>{level}</option>)}
-            </select>
-          </>;
-        })()}
-      </div>
-    ))}
-    {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
-    <button type="button" onClick={() => void save()} disabled={loading || saving} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>{saving ? t("modelsConfig.saving") : t("modelsConfig.saveRoles")}</button>
+    <NativeSettingsScopeBar controller={native} workspace={!!cwd} />
+    <SectionTitle>{t("modelsConfig.modelRolesTitle")}</SectionTitle>
+    <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.modelRolesDesc")}</p>
+    <NativeSettingsFields controller={native} keys={["modelRoleStorage"]} />
+    {Object.values(native.view?.fields ?? {}).filter((field) => field.key.startsWith(MODEL_ROLE_PREFIX)).map((field) => <RoleEditor key={`${native.scope}:${field.key}:${field.saved.token}:${JSON.stringify(field.effective)}`} controller={native} field={field} models={models} />)}
   </div>;
+}
+
+function RoleEditor({ controller, field, models }: { controller: NativeSettingsController; field: NativeSettingView; models: RuntimeModelEntry[] }) {
+  const { t } = useI18n();
+  const role = field.key.slice(MODEL_ROLE_PREFIX.length);
+  const raw = field.saved.exists ? field.saved.value : field.effective.value;
+  const [draft, setDraft] = useState(typeof raw === "string" ? raw : "");
+  const options = models.map((model) => `${model.provider}/${model.id}`);
+  const parsed = splitModelThinking(draft, options);
+  const model = models.find((item) => `${item.provider}/${item.id}` === parsed.model);
+  const levels = [...new Set(["off", "auto", "inherit", ...(model?.thinkingLevels ?? []), ...(parsed.thinking ? [parsed.thinking] : [])])];
+  const disabled = !field.editable || controller.loading || controller.saving || !!controller.conflicts.length;
+  const style: CSSProperties = { minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 };
+  return <section className="settings-card" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+    <code>{role}</code>
+    <NativeSettingState controller={controller} field={field} />
+    <form onSubmit={(event) => { event.preventDefault(); void controller.set(field.key, draft); }} style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+      <input aria-label={t("modelsConfig.roleSelector", { role })} value={draft} onChange={(event) => setDraft(event.target.value)} disabled={disabled} style={{ ...style, flex: "1 1 240px" }} />
+      <select aria-label={t("modelsConfig.roleModel", { role })} value={parsed.model} disabled={disabled} onChange={(event) => setDraft(`${event.target.value}${parsed.thinking ? `:${parsed.thinking}` : ""}`)} style={style}>
+        {!options.includes(parsed.model) && <option value={parsed.model}>{parsed.model || t("nativeSettings.inherited")}</option>}
+        {options.map((value) => <option key={value} value={value}>{value}</option>)}
+      </select>
+      <select aria-label={t("modelsConfig.roleThinking", { role })} value={parsed.thinking} disabled={disabled || !parsed.model} onChange={(event) => setDraft(`${parsed.model}${event.target.value ? `:${event.target.value}` : ""}`)} style={style}>
+        <option value="">{t("modelsConfig.modelDefault")}</option>
+        {levels.map((level) => <option key={level} value={level}>{level}</option>)}
+      </select>
+      <button type="submit" disabled={disabled || !draft.trim()} className="settings-back ui-focus-ring">{t("nativeSettings.set")}</button>
+    </form>
+  </section>;
 }
 // ── API Key detail ────────────────────────────────────────────────────────────
 // omp keeps API keys in its own encrypted credential store (agent.db), which

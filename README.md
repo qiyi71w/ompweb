@@ -88,6 +88,30 @@ OMP 18.8.4 ignores project `.omp/config.yaml`, so that project target remains
 read-only and no `config.yml` is silently created; ordinary project
 `.omp/config.yml` is writable. Invalid YAML is never overwritten.
 
+**OMP model roles** starts in the native `modelRoleStorage` scope. Select the
+target layer explicitly to edit a role or restore its inherited value. Custom
+role names are retained. The selector keeps literal IDs such as `:free`, native
+role aliases and routing suffixes; only native thinking selectors are split.
+Provider preference order and fallback chains preserve their literal entries.
+Complex path-scoped model/provider filters are preserved with a read-only reason.
+
+**Custom providers** displays the actual models file being edited. Saves carry
+individual field/entity intentions and the original baselines, retaining
+unrelated external additions, unknown fields and YAML comments. Renames and
+ordering retain model comment identity. A conflict requires refreshing and
+reviewing the changed file; the editor never silently replays the draft.
+Stored credentials are not returned to the browser. Leave them untouched or
+choose **Preserve stored credential**, enter a replacement, or explicitly
+choose **Clear stored credential**. The model **Test** action only validates
+registry resolution, using preserved credentials server-side; it sends no prompt.
+
+Signing in authenticates the provider but does not alter native model filters.
+An authenticated, disabled provider remains visibly disabled under **Composer
+model picker**. Its **Enable in OMP** action edits the saved disabled-provider
+list in the displayed scope with conflict protection. For inherited filters,
+select the scope containing the saved list; complex lists remain read-only.
+Saving refreshes model queries without claiming to change running sessions.
+
 **Safety & Approvals** lists native `tools.approval` dictionary members,
 including Bash, custom tools and MCP tools. Enter the exact tool name or native
 `policyKey` and choose **Prepare entry** to obtain its current baseline without

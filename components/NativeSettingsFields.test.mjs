@@ -40,6 +40,15 @@ test("ignored project YAML is consumer-visible and cannot be edited or unset", (
   assert.match(screen.container.textContent, /10/);
 });
 
+test("complex provider filter is explained without an empty-list editor", () => {
+  const calls = [];
+  const entry = field("enabledProviders", { exists: true, redacted: true }, [], { editable: false, canUnset: false, reason: "complex-value" });
+  const screen = render(React.createElement(NativeSettingsFields, { controller: controller(entry, calls), keys: [entry.key] }));
+  assert.equal(screen.container.querySelector("textarea, input, select"), null);
+  assert.match(screen.container.textContent, /Complex value preserved/);
+  assert.deepEqual(calls, []);
+});
+
 test("ordered compaction editor saves [] explicitly rather than unsetting and supports native order", () => {
   const calls = [];
   const entry = field("compaction.methodOrder", { exists: true, value: ["soft"] }, ["soft"]);
