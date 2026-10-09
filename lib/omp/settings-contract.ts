@@ -62,6 +62,7 @@ interface SettingDescriptor {
   label: string;
   searchId?: string;
   values?: readonly string[];
+  optionLabels?: Readonly<Record<string, string>>;
   parent?: string;
   application?: SettingsApplication;
   readOnly?: boolean;
@@ -70,40 +71,40 @@ interface SettingDescriptor {
 // Numbers are finite numbers in the native registry, not bounded by TUI quick picks.
 // No native defaults belong here; registration/type and values come from the CLI.
 export const NATIVE_SETTINGS_FIELDS: Record<string, SettingDescriptor> = {
-  defaultThinkingLevel: { type: "enum", label: "reasoning", searchId: "reasoning", values: ["auto", "minimal", "low", "medium", "high", "xhigh", "max"] },
-  "providers.autoThinkingSource": { type: "enum", label: "autoThinkingSource", searchId: "auto-thinking-source", values: ["classifier", "vendor"] },
+  defaultThinkingLevel: { type: "enum", label: "reasoning", searchId: "reasoning", values: ["auto", "minimal", "low", "medium", "high", "xhigh", "max"], optionLabels: Object.fromEntries(["minimal", "low", "medium", "high", "xhigh", "max"].map((value) => [value, `chatInput.thinking${value[0].toUpperCase()}${value.slice(1)}`])) },
+  "providers.autoThinkingSource": { type: "enum", label: "autoThinkingSource", searchId: "auto-thinking-source", values: ["classifier", "vendor"], optionLabels: { classifier: "settingsConfig.autoThinkingClassifier", vendor: "settingsConfig.autoThinkingVendor" } },
   hideThinkingBlock: { type: "boolean", label: "thinkingBlocks", searchId: "thinking-blocks", application: "native-rendering" },
   externalThinking: { type: "boolean", label: "externalThinking", searchId: "external-thinking" },
-  textVerbosity: { type: "enum", label: "verbosity", searchId: "verbosity", values: ["low", "medium", "high"] },
-  personality: { type: "enum", label: "personality", searchId: "personality", values: ["default", "friendly", "pragmatic", "none"] },
+  textVerbosity: { type: "enum", label: "verbosity", searchId: "verbosity", values: ["low", "medium", "high"], optionLabels: { low: "settingsConfig.verbosityLow", medium: "settingsConfig.verbosityMedium", high: "settingsConfig.verbosityHigh" } },
+  personality: { type: "enum", label: "personality", searchId: "personality", values: ["default", "friendly", "pragmatic", "none"], optionLabels: { default: "settingsConfig.personalityDefault", friendly: "settingsConfig.personalityFriendly", pragmatic: "settingsConfig.personalityPragmatic", none: "settingsConfig.personalityNone" } },
   "advisor.enabled": { type: "boolean", label: "advisorEnabled" },
   "advisor.subagents": { type: "boolean", label: "advisorSubagents" },
   "advisor.syncBacklog": { type: "enum", label: "advisorSyncBacklog", values: ["off", "1", "3", "5", "strict"] },
   "advisor.immuneTurns": { type: "number", label: "advisorImmuneTurns" },
-  "tools.approvalMode": { type: "enum", label: "approvalMode", values: ["always-ask", "write", "yolo"], searchId: "approval-mode" },
-  "tools.approval.bash": { type: "enum", label: "bashOverride", parent: "tools.approval", values: ["allow", "prompt", "deny"], searchId: "bash-override" },
-  "tools.approval.extension": { type: "enum", label: "approvalPolicy", parent: "tools.approval", values: ["allow", "prompt", "deny"] },
+  "tools.approvalMode": { type: "enum", label: "approvalMode", values: ["always-ask", "write", "yolo"], searchId: "approval-mode", optionLabels: { "always-ask": "settingsConfig.alwaysAsk", write: "settingsConfig.allowWrites", yolo: "settingsConfig.autoApproveYolo" } },
+  "tools.approval.bash": { type: "enum", label: "bashOverride", parent: "tools.approval", values: ["allow", "prompt", "deny"], searchId: "bash-override", optionLabels: { allow: "settingsConfig.allow", prompt: "settingsConfig.alwaysAsk", deny: "settingsConfig.deny" } },
+  "tools.approval.extension": { type: "enum", label: "approvalPolicy", parent: "tools.approval", values: ["allow", "prompt", "deny"], optionLabels: { allow: "settingsConfig.allow", prompt: "settingsConfig.alwaysAsk", deny: "settingsConfig.deny" } },
   "skills.showStartupDiagnostics": { type: "boolean", label: "skillStartupNotices", searchId: "skill-startup-notices" },
   enabledModels: { type: "array", label: "enabledModels" },
   enabledProviders: { type: "array", label: "enabledProviders" },
-  modelRoleStorage: { type: "enum", label: "modelRoleStorage", values: ["global", "project"] },
+  modelRoleStorage: { type: "enum", label: "modelRoleStorage", values: ["global", "project"], optionLabels: { global: "nativeSettings.global", project: "nativeSettings.project" } },
   disabledProviders: { type: "array", label: "disabledProviders" },
   modelProviderOrder: { type: "array", label: "modelProviderOrder" },
   "retry.enabled": { type: "boolean", label: "retryToggle", searchId: "automatic-retry" },
   "retry.maxRetries": { type: "number", label: "maxAttempts", searchId: "max-attempts" },
   "retry.modelFallback": { type: "boolean", label: "modelFallback", searchId: "model-fallback" },
-  "retry.fallbackRevertPolicy": { type: "enum", label: "fallbackRevertPolicy", values: ["cooldown-expiry", "never"] },
+  "retry.fallbackRevertPolicy": { type: "enum", label: "fallbackRevertPolicy", values: ["cooldown-expiry", "never"], optionLabels: { "cooldown-expiry": "modelsConfig.afterCooldown", never: "modelsConfig.never" } },
   "retry.fallbackChains": { type: "record", label: "fallbackChains" },
   "compaction.enabled": { type: "boolean", label: "automaticCompaction", searchId: "automatic-compaction" },
   "compaction.midTurnEnabled": { type: "boolean", label: "compactMidTurn", searchId: "compact-mid-turn" },
   "compaction.methodOrder": { type: "array", label: "compactionMethodOrder", searchId: "compaction-method-order", values: COMPACTION_METHODS },
   "compaction.autoContinue": { type: "boolean", label: "continueAfterCompaction", searchId: "continue-after-compaction" },
   "compaction.keepRecentTokens": { type: "number", label: "keepRecentTokens" },
-  "memory.backend": { type: "enum", label: "memoryBackend", searchId: "memory-backend", values: ["off", "local", "mnemopi", "hindsight", "sharpshooter"] },
+  "memory.backend": { type: "enum", label: "memoryBackend", searchId: "memory-backend", values: ["off", "local", "mnemopi", "hindsight", "sharpshooter"], optionLabels: { off: "settingsConfig.memoryBackendOff", local: "settingsConfig.memoryBackendLocal", mnemopi: "settingsConfig.memoryBackendMnemopi", hindsight: "settingsConfig.memoryBackendHindsight" } },
   "autolearn.enabled": { type: "boolean", label: "enableAutoLearn", searchId: "enable-auto-learn", application: "native-refresh" },
   "autolearn.autoContinue": { type: "boolean", label: "privateCaptureTurn", searchId: "private-capture-turn", application: "native-refresh" },
   "autolearn.minToolCalls": { type: "number", label: "minToolCalls", application: "native-refresh" },
-  "mnemopi.scoping": { type: "enum", label: "memoryScope", searchId: "memory-scope", values: ["global", "per-project", "per-project-tagged"] },
+  "mnemopi.scoping": { type: "enum", label: "memoryScope", searchId: "memory-scope", values: ["global", "per-project", "per-project-tagged"], optionLabels: { global: "settingsConfig.memoryScopeGlobal", "per-project": "settingsConfig.memoryScopePerProject", "per-project-tagged": "settingsConfig.memoryScopePerProjectTagged" } },
   "mnemopi.autoRecall": { type: "boolean", label: "recallOnSessionStart", searchId: "recall-on-session-start" },
   "mnemopi.autoRetain": { type: "boolean", label: "retainCompletedTurns", searchId: "retain-completed-turns" },
   "mnemopi.noEmbeddings": { type: "boolean", label: "noEmbeddings" },

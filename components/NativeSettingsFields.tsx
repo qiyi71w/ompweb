@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type CSSProperties } from "react";
+import { useId, useState, type CSSProperties } from "react";
 import { ArrowDown, ArrowUp, RefreshCw, RotateCcw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { getNativeSettingDescriptor, type NativeSettingView } from "@/lib/omp/settings-contract";
@@ -48,13 +48,22 @@ export function NativeSettingState({ controller, field }: { controller: NativeSe
 
 function FieldEditor({ controller, field }: { controller: NativeSettingsController; field: NativeSettingView }) {
   const { t } = useI18n();
+  const descriptionId = useId();
   const descriptor = getNativeSettingDescriptor(field.key)!;
-  const value = field.saved.exists && !field.saved.redacted ? field.saved.value : field.policyKey !== undefined ? undefined : field.effective.known ? field.effective.value : undefined;
-  const [draft, setDraft] = useState(valueText(value));
+  const value = field.saved.exists && !field.saved.redacted ? field.saved.value : undefined;
+  const savedText = valueText(value);
+  const [previous, setPrevious] = useState(savedText);
+  const [draft, setDraft] = useState(savedText);
+  if (previous !== savedText) {
+    setPrevious(savedText);
+    if (!controller.conflicts.length) setDraft(savedText);
+  }
   const [invalid, setInvalid] = useState(false);
   const disabled = !field.editable || controller.loading || controller.saving || !!controller.conflicts.length;
   const label = field.policyKey ?? t(`settingsConfig.${descriptor.label}`);
-  const persist = (next: unknown) => { void controller.set(field.key, next); };
+  const persist = (next: unknown) => { if (!disabled) void controller.set(field.key, next); };
+  const descriptionKey = `settingsConfig.${descriptor.label}Desc`;
+  const description = t(descriptionKey);
   let editor;
   if (field.saved.redacted) {
     editor = null;
@@ -66,28 +75,34 @@ function FieldEditor({ controller, field }: { controller: NativeSettingsControll
       [next[index], next[index + delta]] = [next[index + delta], next[index]];
       persist(next);
     };
-    editor = <fieldset disabled={disabled} aria-label={label} style={{ border: 0, padding: 0, margin: 0 }}>
+    editor = <fieldset aria-disabled={disabled} aria-label={label} onClickCapture={(event) => { if (disabled) event.preventDefault(); }} style={{ border: 0, padding: 0, margin: 0 }}>
       {methods.map((method) => {
         const index = order.indexOf(method);
         const name = t(`settingsConfig.compactionMethod.${method}`);
         return <div key={method} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-          <label style={{ flex: 1 }}><input type="checkbox" checked={index >= 0} onChange={(event) => persist(event.target.checked ? [...order, method] : order.filter((item) => item !== method))} /> {name}</label>
-          <button type="button" className="settings-back ui-focus-ring" disabled={index <= 0} aria-label={t("settingsConfig.moveCompactionMethodUp", { method: name })} onClick={() => move(index, -1)}><ArrowUp size={14} /></button>
-          <button type="button" className="settings-back ui-focus-ring" disabled={index < 0 || index >= order.length - 1} aria-label={t("settingsConfig.moveCompactionMethodDown", { method: name })} onClick={() => move(index, 1)}><ArrowDown size={14} /></button>
+          <span aria-hidden="true">{index >= 0 ? index + 1 : "—"}</span>
+          <label style={{ flex: 1 }}><input type="checkbox" checked={index >= 0} aria-label={index >= 0 ? t("settingsConfig.compactionMethodPosition", { method: name, position: index + 1 }) : name} aria-describedby={`${descriptionId}-${method}`} aria-disabled={disabled} onChange={(event) => persist(event.target.checked ? [...order, method] : order.filter((item) => item !== method))} /> {name}<span id={`${descriptionId}-${method}`} style={{ display: "block", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{t(`settingsConfig.compactionMethod.${method}Desc`)}</span></label>
+          <button type="button" className="settings-back ui-focus-ring" aria-disabled={disabled || index <= 0} aria-label={t("settingsConfig.moveCompactionMethodUp", { method: name })} onClick={() => { if (index > 0) move(index, -1); }}><ArrowUp size={14} /></button>
+          <button type="button" className="settings-back ui-focus-ring" aria-disabled={disabled || index < 0 || index >= order.length - 1} aria-label={t("settingsConfig.moveCompactionMethodDown", { method: name })} onClick={() => { if (index >= 0 && index < order.length - 1) move(index, 1); }}><ArrowDown size={14} /></button>
         </div>;
       })}
-      {order.length === 0 && field.effective.known && <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>{t("settingsConfig.compactionMethodsNone")}</p>}
+      {order.length === 0 && <p role="status" style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>{t(field.saved.exists ? "settingsConfig.compactionMethodsNone" : "nativeSettings.inherited")}</p>}
     </fieldset>;
   } else if (descriptor.type === "boolean" || descriptor.type === "enum") {
     const choices = descriptor.type === "boolean" ? ["true", "false"] : descriptor.values ?? [];
     const current = value === undefined ? "" : String(value);
-    editor = <select aria-label={label} value={current} disabled={disabled} style={controlStyle} onChange={(event) => persist(descriptor.type === "boolean" ? event.target.value === "true" : event.target.value)}>
-      {(!choices.includes(current) || !current) && <option value={current}>{current || t(field.policyKey !== undefined ? "nativeSettings.inherited" : "nativeSettings.unknown")}</option>}
-      {choices.map((choice) => <option key={choice} value={choice}>{descriptor.type === "boolean" ? t(`nativeSettings.${choice}`) : choice}</option>)}
+    editor = <select aria-label={label} value={current} disabled={!field.editable || !!controller.conflicts.length} aria-disabled={disabled} style={controlStyle} onChange={(event) => persist(descriptor.type === "boolean" ? event.target.value === "true" : event.target.value)}>
+      {(!choices.includes(current) || !current) && <option value={current} disabled>{current || t("nativeSettings.inherited")}</option>}
+      {choices.map((choice) => {
+        const key = descriptor.type === "boolean" ? `nativeSettings.${choice}` : descriptor.optionLabels?.[choice] ?? `nativeSettings.enum.${choice}`;
+        const translated = t(key);
+        return <option key={choice} value={choice}>{translated === key ? choice : translated}</option>;
+      })}
     </select>;
   } else {
     editor = <form onSubmit={(event) => {
       event.preventDefault();
+      if (disabled) return;
       try {
         const next: unknown = descriptor.type === "number" ? Number(draft) : JSON.parse(draft);
         if (!draft.trim() || (descriptor.type === "number" && !Number.isFinite(next))) throw new Error("invalid");
@@ -95,13 +110,13 @@ function FieldEditor({ controller, field }: { controller: NativeSettingsControll
         persist(next);
       } catch { setInvalid(true); }
     }} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-      {descriptor.type === "number" ? <input aria-label={label} type="number" step="any" value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)} style={{ ...controlStyle, width: 120 }} /> : <textarea aria-label={label} value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)} rows={3} style={{ ...controlStyle, width: 280, fontFamily: "var(--font-mono)" }} />}
-      <button type="submit" disabled={disabled || !draft.trim()} className="settings-back ui-focus-ring">{t("nativeSettings.set")}</button>
+      {descriptor.type === "number" ? <input aria-label={label} type="number" step="any" value={draft} readOnly={disabled} aria-disabled={disabled} onChange={(event) => { if (!disabled) setDraft(event.target.value); }} style={{ ...controlStyle, width: 120 }} /> : <textarea aria-label={label} value={draft} readOnly={disabled} aria-disabled={disabled} onChange={(event) => { if (!disabled) setDraft(event.target.value); }} rows={3} style={{ ...controlStyle, width: 280, fontFamily: "var(--font-mono)" }} />}
+      <button type="submit" aria-disabled={disabled || !draft.trim()} className="settings-back ui-focus-ring">{t("nativeSettings.set")}</button>
       {invalid && <span role="alert">{t("nativeSettings.invalidValue")}</span>}
     </form>;
   }
   return <div className="settings-card" data-search-id={descriptor.searchId ?? field.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 12, marginBottom: 10 }} data-native-field={field.key}>
-    <div className="settings-card-text" style={{ flex: "1 1 240px" }}><div className="settings-card-title">{label}</div><code style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)" }}>{field.key}</code><NativeSettingState controller={controller} field={field} /></div>
+    <div className="settings-card-text" style={{ flex: "1 1 240px" }}><div className="settings-card-title">{label}</div>{description !== descriptionKey && <p style={{ margin: "4px 0", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{description}</p>}<code style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)" }}>{field.key}</code><NativeSettingState controller={controller} field={field} /></div>
     <div className="settings-card-control">{editor}</div>
   </div>;
 }
@@ -110,7 +125,7 @@ export function NativeSettingsFields({ controller, keys }: { controller: NativeS
   if (!controller.view) return null;
   return <>{keys.map((key) => {
     const field = controller.view!.fields[key];
-    return field ? <FieldEditor key={`${controller.scope}:${key}:${field.saved.token}:${JSON.stringify(field.native)}`} controller={controller} field={field} /> : null;
+    return field ? <FieldEditor key={`${controller.view!.context.id}:${controller.scope}:${key}`} controller={controller} field={field} /> : null;
   })}</>;
 }
 

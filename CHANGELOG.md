@@ -38,6 +38,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Native setting, registry, fallback and role editors now start from the selected file's saved overrides, without copying workspace values into global configuration. Keep field drafts through unrelated refreshes and keyboard focus through saves and compaction reordering; restore localized enum labels, setting descriptions and compaction position cues.
 - Keep attachment errors in the current interface language after a locale change, and declare the modal panel references used by focus and resize callbacks.
 - Keep recording preview progress current when media duration is unavailable, and retain capture and preview state across callback updates.
 - Keep tool authorization and execution under native `allow` / `prompt` / `deny` policies. Web confirmation titles no longer trigger automatic approval from the legacy `extension` entry; tool, login and editor requests wait for user responses. Per-entry changes preserve sibling policies, punctuation, comments and same-field conflict protection.

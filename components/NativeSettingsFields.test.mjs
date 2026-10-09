@@ -9,9 +9,10 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true, jsx: { runtime: "automatic" } });
 const { NativeSettingsFields, NativeToolApprovals } = await jiti.import("./NativeSettingsFields.tsx");
 const { NATIVE_SETTINGS_FIELDS } = await jiti.import("../lib/omp/settings-contract.ts");
+const { setLocale, translate } = await jiti.import("../lib/i18n/index.tsx");
 afterEach(cleanup);
 function controller(field, calls) {
-  return { view: { fields: { [field.key]: field } }, scope: "global", loading: false, saving: false, conflicts: [], set: async (...args) => calls.push(["set", ...args]), unset: async (...args) => calls.push(["unset", ...args]) };
+  return { view: { context: { id: "context" }, fields: { [field.key]: field } }, scope: "global", loading: false, saving: false, conflicts: [], set: async (...args) => calls.push(["set", ...args]), unset: async (...args) => calls.push(["unset", ...args]) };
 }
 function field(key, saved, effective, extra = {}) {
   return { key, saved: { ...saved, token: "baseline" }, effective: { known: true, value: effective }, native: { known: true, value: effective }, editable: true, canUnset: saved.exists, application: "new-session", ...extra };
@@ -33,7 +34,7 @@ test("ignored project YAML is consumer-visible and cannot be edited or unset", (
   const calls = [];
   const entry = field("retry.maxRetries", { exists: true, value: 99 }, 10, { editable: false, canUnset: false, reason: "project-yaml-unsupported" });
   const screen = render(React.createElement(NativeSettingsFields, { controller: controller(entry, calls), keys: [entry.key] }));
-  assert.equal(screen.container.querySelector("input").disabled, true);
+  assert.equal(screen.container.querySelector("input").readOnly, true);
   assert.match(screen.container.textContent, /18\.8\.4.*config\.yaml/);
   assert.equal(screen.queryByRole("button", { name: /retry.maxRetries/ }), null);
   assert.match(screen.container.textContent, /99/);
@@ -83,4 +84,90 @@ test("dynamic approval controls preserve literal names and distinguish inherited
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "xd://my.device:v2" } });
   await act(async () => { fireEvent.submit(screen.getByRole("textbox").closest("form")); });
   assert.deepEqual(calls[2], ["discover", "xd://my.device:v2"]);
+});
+
+test("selected layer stays empty while inherited arrays and records remain visible", () => {
+  for (const [key, effective] of [["disabledProviders", ["project-only"]], ["retry.fallbackChains", { default: ["project/model"] }]]) {
+    const calls = [];
+    const entry = field(key, { exists: false }, effective);
+    const screen = render(React.createElement(NativeSettingsFields, { controller: controller(entry, calls), keys: [key] }));
+    const input = screen.getByRole("textbox");
+    assert.equal(input.value, "");
+    assert.ok(screen.container.textContent.includes("project"));
+    fireEvent.change(input, { target: { value: key === "disabledProviders" ? '["chosen"]' : '{"default":["chosen/model"]}' } });
+    fireEvent.submit(input.closest("form"));
+    assert.deepEqual(calls[0][2], key === "disabledProviders" ? ["chosen"] : { default: ["chosen/model"] });
+    screen.unmount();
+  }
+});
+
+test("save and native invalidation preserve select identity and focus while busy suppresses writes", () => {
+  const calls = [];
+  const entry = field("tools.approvalMode", { exists: false }, "always-ask");
+  const state = controller(entry, calls);
+  const screen = render(React.createElement(NativeSettingsFields, { controller: state, keys: [entry.key] }));
+  const select = screen.getByRole("combobox");
+  select.focus();
+  fireEvent.change(select, { target: { value: "write" } });
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: { ...state, saving: true }, keys: [entry.key] }));
+  assert.equal(document.activeElement, select);
+  fireEvent.change(select, { target: { value: "yolo" } });
+  assert.equal(calls.length, 1);
+  const saved = field(entry.key, { exists: true, value: "write", token: "changed" }, "yolo");
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: controller(saved, calls), keys: [entry.key] }));
+  assert.equal(screen.getByRole("combobox"), select);
+  assert.equal(document.activeElement, select);
+  assert.equal(select.value, "write");
+});
+
+test("unrelated native refresh preserves dirty drafts and scope changes reinitialize", () => {
+  const calls = [];
+  const entry = field("retry.maxRetries", { exists: true, value: 10 }, 10);
+  const state = controller(entry, calls);
+  const screen = render(React.createElement(NativeSettingsFields, { controller: state, keys: [entry.key] }));
+  const input = screen.getByRole("spinbutton");
+  fireEvent.change(input, { target: { value: "21" } });
+  const refreshed = controller({ ...entry, native: { known: true, value: 99 } }, calls);
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: refreshed, keys: [entry.key] }));
+  assert.equal(input.value, "21");
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: { ...refreshed, scope: "project" }, keys: [entry.key] }));
+  assert.equal(screen.getByRole("spinbutton").value, "10");
+});
+
+test("compaction reorder keeps focused keyed control through delayed save and boundary", () => {
+  const calls = [];
+  const entry = field("compaction.methodOrder", { exists: true, value: ["remote", "soft", "shake"] }, []);
+  const state = controller(entry, calls);
+  const screen = render(React.createElement(NativeSettingsFields, { controller: state, keys: [entry.key] }));
+  const up = screen.getByRole("button", { name: "Move Shake up" });
+  up.focus();
+  fireEvent.click(up);
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: { ...state, saving: true }, keys: [entry.key] }));
+  fireEvent.click(up);
+  assert.equal(calls.length, 1);
+  assert.equal(document.activeElement, up);
+  const saved = field(entry.key, { exists: true, value: calls[0][2] }, calls[0][2]);
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: controller(saved, calls), keys: [entry.key] }));
+  assert.equal(document.activeElement, up);
+  assert.equal(screen.getByRole("button", { name: "Move Shake up" }), up);
+  assert.deepEqual(calls[0][2], ["remote", "shake", "soft"]);
+});
+
+test("localized approval options still submit native values and unknown values stay readonly", () => {
+  const calls = [];
+  const entry = field("tools.approvalMode", { exists: false }, "always-ask");
+  const screen = render(React.createElement(NativeSettingsFields, { controller: controller(entry, calls), keys: [entry.key] }));
+  try {
+    for (const locale of ["zh-CN", "ja"]) {
+      act(() => setLocale(locale));
+      const option = screen.getByRole("option", { name: translate("settingsConfig.autoApproveYolo") });
+      assert.equal(option.value, "yolo");
+      fireEvent.change(screen.getByRole("combobox"), { target: { value: option.value } });
+      assert.deepEqual(calls.at(-1), ["set", entry.key, "yolo"]);
+    }
+    const unknown = field(entry.key, { exists: true, value: "future-policy" }, "future-policy", { editable: false, reason: "unknown-enum" });
+    screen.rerender(React.createElement(NativeSettingsFields, { controller: controller(unknown, calls), keys: [entry.key] }));
+    assert.equal(screen.getByRole("combobox").disabled, true);
+    assert.equal(screen.getByRole("combobox").value, "future-policy");
+  } finally { act(() => setLocale("en")); }
 });
