@@ -6,6 +6,7 @@ import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
 import { MCP_EDITABLE_FIELDS, type McpOperation, type McpProjectServer, type McpView } from "@/lib/omp/mcp-contract";
+import { NATIVE_SETTINGS_CHANGED_EVENT } from "@/hooks/useNativeSettings";
 
 const inputStyle = { width: "100%", padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", font: "12px var(--font-mono)" } as const;
 const newServer = () => JSON.stringify({ type: "stdio", command: "", args: [] }, null, 2);
@@ -29,12 +30,25 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
   const [credentials, setCredentials] = useState<Record<"env" | "headers", "preserve" | "replace" | "clear">>({ env: "preserve", headers: "preserve" });
   const [credentialValues, setCredentialValues] = useState({ env: "{}", headers: "{}" });
   const generation = useRef(0);
+  const mutationGeneration = useRef(0);
+  const contextRef = useRef({ cwd, sessionId });
+  contextRef.current = { cwd, sessionId };
+  const savingRef = useRef(false);
+  const editorRef = useRef({ dirty: false, conflicted: false, selected: null as string | null });
+  editorRef.current = {
+    dirty: name !== (original?.name ?? "") || source !== (original ? JSON.stringify(original.config, null, 2) : newServer()) || credentials.env !== "preserve" || credentials.headers !== "preserve",
+    conflicted,
+    selected: original?.name ?? null,
+  };
   const selected = original?.name ?? null;
   const servers = view?.servers ?? [];
   const path = view?.path;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (background = false) => {
+    const protectedDraft = () => savingRef.current || editorRef.current.dirty || editorRef.current.conflicted;
+    if (background && protectedDraft()) return;
     const ticket = ++generation.current;
+    const isCurrent = () => generation.current === ticket && contextRef.current.cwd === cwd && contextRef.current.sessionId === sessionId;
     setLoading(true);
     setMessage(null);
     try {
@@ -44,33 +58,43 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       const response = await fetch(`/api/mcp?${params}`);
       if (!response.ok) throw new Error("read-failed");
       const data = await response.json() as McpView;
-      if (generation.current !== ticket) return;
+      if (!isCurrent() || (background && protectedDraft())) return;
       setView(data);
-      setOriginal(null);
-      setName("");
-      setSource(newServer());
+      const next = background ? data.servers.find((server) => server.name === editorRef.current.selected) ?? null : null;
+      setOriginal(next);
+      setName(next?.name ?? "");
+      setSource(next ? JSON.stringify(next.config, null, 2) : newServer());
       setCredentials({ env: "preserve", headers: "preserve" });
       setCredentialValues({ env: "{}", headers: "{}" });
       setConflicted(false);
     } catch {
-      if (generation.current === ticket) { setView(null); setMessage("read-failed"); }
-    } finally { if (generation.current === ticket) setLoading(false); }
+      if (isCurrent() && !(background && protectedDraft())) { setView(null); setMessage("read-failed"); }
+    } finally { if (isCurrent()) setLoading(false); }
   }, [cwd, sessionId]);
 
   useEffect(() => {
     const requestState = generation;
+    const mutationState = mutationGeneration;
+    savingRef.current = false;
+    setSaving(false);
     void load();
-    const refresh = () => { void load(); };
-    window.addEventListener("omp-native-settings-changed", refresh);
-    return () => { requestState.current++; window.removeEventListener("omp-native-settings-changed", refresh); };
+    const refresh = () => { void load(true); };
+    window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh);
+    return () => { requestState.current++; mutationState.current++; window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh); };
   }, [load]);
 
   const choose = (server: McpProjectServer) => {
+    if (savingRef.current) return;
+    generation.current++;
+    setLoading(false);
     setOriginal(server); setName(server.name); setSource(JSON.stringify(server.config, null, 2));
     setCredentials({ env: "preserve", headers: "preserve" }); setCredentialValues({ env: "{}", headers: "{}" });
     setConflicted(false); setMessage(null);
   };
   const add = () => {
+    if (savingRef.current) return;
+    generation.current++;
+    setLoading(false);
     setOriginal(null); setName(""); setSource(newServer());
     setCredentials({ env: "preserve", headers: "preserve" }); setCredentialValues({ env: "{}", headers: "{}" });
     setConflicted(false); setMessage(null);
@@ -84,33 +108,40 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
     } catch { setMessage("invalid"); return null; }
   };
   const check = async () => {
+    if (savingRef.current) return;
     const server = parse();
     if (!server) return;
-    const ticket = generation.current;
+    const ticket = ++generation.current;
+    savingRef.current = true;
+    setLoading(false);
     setSaving(true);
     try {
       const response = await fetch("/api/mcp", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, server }) });
       if (ticket === generation.current) setMessage(response.ok ? "valid" : "invalid");
     } catch { if (ticket === generation.current) setMessage("request-failed"); }
-    finally { setSaving(false); }
+    finally { if (ticket === generation.current) { savingRef.current = false; setSaving(false); } }
   };
   const submit = async (operations: McpOperation[]) => {
-    if (!view || conflicted || !operations.length) return;
-    const ticket = generation.current;
+    if (!view || conflicted || savingRef.current || !operations.length) return;
+    const ticket = ++generation.current;
+    const mutation = ++mutationGeneration.current;
+    const isContextCurrent = () => contextRef.current.cwd === cwd && contextRef.current.sessionId === sessionId;
+    savingRef.current = true;
+    setLoading(false);
     setSaving(true);
     try {
       const response = await fetch("/api/mcp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd, sessionId, contextId: view.context.id, operations }) });
       const data = await response.json();
-      if (ticket !== generation.current) return;
+      if (ticket !== generation.current || !isContextCurrent()) return;
       if (response.status === 409) {
         setView((previous) => previous ? { ...previous, ...data.latest } : previous);
         setConflicted(true); setMessage("conflict"); return;
       }
       if (!response.ok) throw new Error();
       await load();
-      toast.success(t("mcpConfig.savedNotApplied"));
-    } catch { if (ticket === generation.current) setMessage("request-failed"); }
-    finally { setSaving(false); }
+      if (isContextCurrent()) toast.success(t("mcpConfig.savedNotApplied"));
+    } catch { if (ticket === generation.current && isContextCurrent()) setMessage("request-failed"); }
+    finally { if (mutationGeneration.current === mutation) { savingRef.current = false; setSaving(false); } }
   };
   const save = async () => {
     const server = parse();
@@ -138,8 +169,10 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
   };
   const remove = async () => { if (original) await submit([{ op: "delete", name: original.name, baseline: original.baseline }]); };
   const startLive = async () => {
-    if (!view || !sessionId) return;
-    const ticket = generation.current;
+    if (!view || !sessionId || savingRef.current) return;
+    const ticket = ++generation.current;
+    savingRef.current = true;
+    setLoading(false);
     setSaving(true);
     try {
       let advisor = false;
@@ -149,7 +182,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       const next = await response.json() as McpView;
       if (generation.current === ticket) setView(next);
     } catch { if (generation.current === ticket) setMessage("request-failed"); }
-    finally { setSaving(false); }
+    finally { if (ticket === generation.current) { savingRef.current = false; setSaving(false); } }
   };
   const displayedServers = view?.inventory ?? [];
 
@@ -157,7 +190,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
     <section style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "visible", background: "var(--bg-panel)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
         <strong style={{ fontSize: 12, color: "var(--text)" }}>{t("mcpConfig.configuredServers")}</strong>
-        <button className="mcp-refresh-button ui-focus-ring" type="button" title={t("mcpConfig.refreshLiveStatus")} aria-label={t("mcpConfig.refreshLiveStatus")} onClick={() => void load()} disabled={loading} style={{ marginLeft: "auto", width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: loading ? "wait" : "pointer" }}>
+        <button className="mcp-refresh-button ui-focus-ring" type="button" title={t("mcpConfig.refreshLiveStatus")} aria-label={t("mcpConfig.refreshLiveStatus")} onClick={() => void load()} disabled={loading || saving} style={{ marginLeft: "auto", width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: loading ? "wait" : "pointer" }}>
           <RefreshCw size={14} />
         </button>
       </div>

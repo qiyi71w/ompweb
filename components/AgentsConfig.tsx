@@ -51,6 +51,9 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
   const [conflict, setConflict] = useState(false);
   const selectedRef = useRef<string | null>(null);
   const loadGenerationRef = useRef(0);
+  const mutationGenerationRef = useRef(0);
+  const editorRef = useRef({ dirty: false, saving: false, conflict: false, creating: false });
+  editorRef.current = { dirty: Object.keys(edits).length > 0, saving, conflict, creating };
   const cwdRef = useRef(cwd);
   cwdRef.current = cwd;
   const sessionRef = useRef(sessionId);
@@ -63,7 +66,12 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
   const [thinkingLevel, setThinkingLevel] = useState("");
   const [body, setBody] = useState("");
 
-  const load = useCallback(async (forceSelect = false) => {
+  const load = useCallback(async (forceSelect = true, background = false) => {
+    const protectedDraft = () => {
+      const state = editorRef.current;
+      return state.dirty || state.saving || state.conflict || state.creating;
+    };
+    if (background && protectedDraft()) return;
     const generation = ++loadGenerationRef.current;
     const requestCwd = cwd;
     const isCurrent = () => loadGenerationRef.current === generation && cwdRef.current === requestCwd && sessionRef.current === sessionId;
@@ -95,6 +103,7 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
       }
       const list = Array.isArray(data.agents) ? data.agents : [];
       if (!isCurrent()) return;
+      if (background && protectedDraft()) return;
       setAgents(list);
       setContextId(data.context?.id ?? "");
       setConflict(false);
@@ -104,7 +113,8 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
         .filter((diagnostic) => diagnostic.type === "error" && typeof diagnostic.message === "string")
         .map((diagnostic) => diagnostic.message as string);
       if (diagnosticErrors.length > 0 && list.length === 0) setMessage(diagnosticErrors.join("; "));
-      if (forceSelect || !creating) {
+      if (forceSelect || !editorRef.current.creating) {
+        if (forceSelect) setCreating(false);
         const currentName = selectedRef.current;
         const chosen = (currentName ? list.find((a) => a.name === currentName) : undefined) ?? list[0] ?? null;
         selectedRef.current = chosen?.name ?? null;
@@ -117,18 +127,21 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
       const msg = e instanceof Error ? e.message : String(e);
       setWorkspaceCheckPending(false);
       setMessage(msg);
-    } finally { if (isCurrent()) { setLoading(false); setSaving(false); setWorkspaceCheckPending(false); } }
-  }, [cwd, sessionId, creating, t]);
+    } finally { if (isCurrent()) { setLoading(false); setWorkspaceCheckPending(false); } }
+  }, [cwd, sessionId, t]);
   useEffect(() => {
     void load();
-    const refresh = () => { void load(); };
+    const refresh = () => { void load(false, true); };
     window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh);
-    return () => { loadGenerationRef.current += 1; window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh); };
+    return () => { loadGenerationRef.current += 1; mutationGenerationRef.current += 1; window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh); };
   }, [load]);
   useEffect(() => {
     setWorkspaceUnavailable(false);
     setWorkspaceCheckPending(Boolean(cwd));
     setSaving(false);
+    setCreating(false);
+    setEdits({});
+    setConflict(false);
   }, [cwd, sessionId]);
   const canEditProject = Boolean(cwd && !workspaceUnavailable && !workspaceCheckPending);
   useEffect(() => { setCreateScope(canEditProject ? "project" : "user"); }, [canEditProject]);
@@ -158,14 +171,15 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
     setThinkingLevel(typeof a.rawFrontmatter?.thinkingLevel === "string" ? a.rawFrontmatter.thinkingLevel : typeof a.rawFrontmatter?.thinking === "string" ? a.rawFrontmatter.thinking : "");
     setBody(a.body ?? "");
     setEdits({});
+    setConflict(false);
   }
   function clearForm() {
     setName(""); setDescription(""); setModelCsv(""); setToolsCsv("");
     setSpawnsCsv(""); setThinkingLevel(""); setBody("");
     setEdits({}); setConflict(false);
   }
-  const pick = (a: AgentInfo) => { selectedRef.current = a.name; setCreating(false); setSelected(a.name); fillForm(a); setMessage(null); };
-  const startCreate = () => { selectedRef.current = null; setCreating(true); setSelected(null); clearForm(); setMessage(null); setCreateScope(canEditProject ? "project" : "user"); };
+  const pick = (a: AgentInfo) => { if (editorRef.current.saving) return; loadGenerationRef.current++; selectedRef.current = a.name; setCreating(false); setSelected(a.name); fillForm(a); setMessage(null); setLoading(false); setWorkspaceCheckPending(false); };
+  const startCreate = () => { if (editorRef.current.saving) return; loadGenerationRef.current++; selectedRef.current = null; setCreating(true); setSelected(null); clearForm(); setMessage(null); setCreateScope(canEditProject ? "project" : "user"); setLoading(false); setWorkspaceCheckPending(false); };
   const cancelCreate = () => {
     setCreating(false); setMessage(null);
     if (agents[0]) { selectedRef.current = agents[0].name; setSelected(agents[0].name); fillForm(agents[0]); }
@@ -173,10 +187,14 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
   };
   const mutationParams = new URLSearchParams({ ...(cwd && !workspaceUnavailable ? { cwd } : {}), ...(sessionId ? { sessionId } : {}) });
   const unpack = async () => {
-    const requestGeneration = loadGenerationRef.current;
+    if (editorRef.current.saving) return;
+    editorRef.current.saving = true;
+    const mutation = ++mutationGenerationRef.current;
+    const requestGeneration = ++loadGenerationRef.current;
     const requestCwd = cwd;
     const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd && sessionRef.current === sessionId;
     setSaving(true); setMessage(null);
+    setLoading(false);
     try {
       const scope: "user" | "project" = canEditProject ? "project" : "user";
       const res = await fetch(`/api/agents?${mutationParams}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "unpack", scope, contextId }) });
@@ -190,17 +208,21 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
       toast.success(t("agentsConfig.unpackedToast", { count }));
       await load();
     } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); }
-    finally { if (isCurrent()) setSaving(false); }
+    finally { if (mutationGenerationRef.current === mutation) { editorRef.current.saving = false; setSaving(false); } }
   };
   const save = async () => {
+    if (editorRef.current.saving || conflict) return;
     const trimmedName = name.trim();
     if (!trimmedName) { setMessage(t("agentsConfig.nameRequired")); return; }
     if ((creating || edits.name) && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(trimmedName)) { setMessage(t("agentsConfig.namePatternError")); return; }
     if (!description.trim()) { setMessage(t("agentsConfig.descriptionRequired")); return; }
-    const requestGeneration = loadGenerationRef.current;
+    editorRef.current.saving = true;
+    const mutation = ++mutationGenerationRef.current;
+    const requestGeneration = ++loadGenerationRef.current;
     const requestCwd = cwd;
     const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd && sessionRef.current === sessionId;
     setSaving(true); setMessage(null);
+    setLoading(false);
     try {
       const scope = creating ? createScope : active?.template?.scope;
       if (!scope || (scope === "project" && !canEditProject)) throw new Error(t("agentsConfig.selectWorkspaceRequired"));
@@ -211,6 +233,7 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
         const prepared = await prepare.json() as { template?: AgentTemplateView; error?: string };
         if (!prepare.ok || !prepared.template) throw new Error(prepared.error || t("nativeSettings.requestFailed"));
         original = prepared.template;
+        if (!isCurrent()) return;
         if (original.exists) throw new Error(t("agentsConfig.nameExists"));
       }
       if (!original) return;
@@ -228,14 +251,17 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
       toast.success(creating ? t("agentsConfig.agentCreatedToast", { name: trimmedName }) : t("agentsConfig.agentSavedToast", { name: trimmedName }));
       selectedRef.current = trimmedName; setCreating(false); setSelected(trimmedName); await load(true);
     } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); }
-    finally { if (isCurrent()) setSaving(false); }
+    finally { if (mutationGenerationRef.current === mutation) { editorRef.current.saving = false; setSaving(false); } }
   };
   const remove = async () => {
-    if (!active?.template || activeProjectUnavailable || conflict) return;
-    const requestGeneration = loadGenerationRef.current;
+    if (!active?.template || activeProjectUnavailable || conflict || editorRef.current.saving) return;
+    editorRef.current.saving = true;
+    const mutation = ++mutationGenerationRef.current;
+    const requestGeneration = ++loadGenerationRef.current;
     const requestCwd = cwd;
     const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd && sessionRef.current === sessionId;
     setSaving(true); setMessage(null);
+    setLoading(false);
     try {
       const original = active.template;
       const res = await fetch(`/api/agents?${mutationParams}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextId: original.contextId, scope: original.scope, name: original.name, action: "delete", baseline: original.baseline, operations: [] }) });
@@ -249,7 +275,7 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
       toast.success(t("agentsConfig.agentRemovedToast", { name: active.name }));
       selectedRef.current = null; setSelected(null); clearForm(); await load();
     } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); }
-    finally { if (isCurrent()) setSaving(false); }
+    finally { if (mutationGenerationRef.current === mutation) { editorRef.current.saving = false; setSaving(false); } }
   };
   const copyPath = async (p: string) => {
     try { await navigator.clipboard.writeText(p); toast.success(t("agentsConfig.pathCopied")); }
@@ -257,11 +283,12 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
   };
   const markEdit = (key: string, op: "set" | "unset" = "set") => setEdits((previous) => ({ ...previous, [key]: op }));
   const disabledField = native.view?.fields["task.disabledAgents"];
+  const savedDisabledAgents = disabledField && !disabledField.saved.exists ? [] : Array.isArray(disabledField?.saved.value) ? disabledField.saved.value : null;
   const disabledAgents = disabledField?.effective.known && Array.isArray(disabledField.effective.value) ? disabledField.effective.value : null;
   const toggleAgent = async () => {
-    if (!active || !disabledAgents) return;
-    const next = disabledAgents.includes(active.name) ? disabledAgents.filter((name) => name !== active.name) : [...disabledAgents, active.name];
-    if (await native.set("task.disabledAgents", next)) await load();
+    if (!active || !savedDisabledAgents) return;
+    const next = savedDisabledAgents.includes(active.name) ? savedDisabledAgents.filter((name) => name !== active.name) : [...savedDisabledAgents, active.name];
+    await native.set("task.disabledAgents", next);
   };
 
   return (
@@ -383,7 +410,8 @@ export function AgentsConfig({ cwd, sessionId }: { cwd: string | null; sessionId
                   ) : null}
                 </div>
                 {active && <section style={{ display: "grid", gap: 6, fontSize: 12, overflowWrap: "anywhere" }}>
-                  <label><input type="checkbox" aria-label={t("agentsConfig.nativeEnabled")} checked={disabledAgents !== null && !disabledAgents.includes(active.name)} disabled={!disabledField?.editable || !disabledAgents || native.loading || native.saving || !!native.conflicts.length} onChange={() => void toggleAgent()} /> {t("agentsConfig.nativeEnabled")} {!disabledAgents && t("nativeSettings.unknown")}</label>
+                  <label><input type="checkbox" aria-label={t("agentsConfig.nativeEnabled")} checked={savedDisabledAgents !== null && !savedDisabledAgents.includes(active.name)} disabled={!disabledField?.editable || !savedDisabledAgents || native.loading || native.saving || !!native.conflicts.length} onChange={() => void toggleAgent()} /> {t("agentsConfig.nativeEnabled")} · {t("nativeSettings.savedValue")} ({t(`nativeSettings.${native.scope}`)})</label>
+                  <div>{t("nativeSettings.effectiveValue")}: {disabledAgents === null ? t("nativeSettings.unknown") : t(disabledAgents.includes(active.name) ? "nativeSettings.false" : "nativeSettings.true")}</div>
                   {active.legacyEnabled === false && <p role="status">{t("agentsConfig.legacyEnabledWarning")}</p>}
                   <div>{t("agentsConfig.templateModel")}: <code>{JSON.stringify(active.rawFrontmatter?.model) ?? t("nativeSettings.inherited")}</code></div>
                   <div>{t("agentsConfig.nativeModelOverride")}: <code>{native.view?.fields["task.agentModelOverrides"]?.effective.known ? JSON.stringify((native.view.fields["task.agentModelOverrides"].effective.value as Record<string, unknown>)?.[active.name]) ?? t("nativeSettings.inherited") : t("nativeSettings.unknown")}</code></div>
