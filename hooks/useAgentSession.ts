@@ -3299,14 +3299,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, loadSession, refreshLiveModelState]);
 
+  const modelsRequestRef = useRef(0);
   const loadModels = useCallback(async (signal?: AbortSignal) => {
+    const request = ++modelsRequestRef.current;
+    const isCurrent = () => request === modelsRequestRef.current && !signal?.aborted;
     setModelsLoading(true);
     try {
+      const query = new URLSearchParams();
       const modelCwd = newSessionCwd ?? session?.cwd ?? "";
-      const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
+      if (modelCwd) query.set("cwd", modelCwd);
+      if (!isNew && session?.id) query.set("sessionId", session.id);
+      const modelsUrl = `/api/models${query.size ? `?${query}` : ""}`;
       const res = await fetch(modelsUrl, { cache: "no-store", ...(signal ? { signal } : {}) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as ModelsResponse;
+      if (!isCurrent()) return;
       setModelNames(d.models);
       setModelError(d.modelError ?? null);
       setModelThinkingLevels(d.thinkingLevels ?? {});
@@ -3324,11 +3331,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       // Surface fetch/parse failures instead of silently rendering an empty
       // model list with no error state.
-      if (!signal?.aborted) setModelError(e instanceof Error ? e.message : String(e));
+      if (isCurrent()) setModelError(e instanceof Error ? e.message : String(e));
     } finally {
-      setModelsLoading(false);
+      if (isCurrent()) setModelsLoading(false);
     }
-  }, [isNew, newSessionCwd, session?.cwd]);
+  }, [isNew, newSessionCwd, session?.cwd, session?.id]);
 
   /** Ask a side question, or a follow-up in `recordId`'s topic. It runs beside
    * any main turn and never enters the transcript. False = refused (toasted),
@@ -3869,7 +3876,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadModels(controller.signal).catch((e) => {
       if (e instanceof DOMException && e.name === "AbortError") return;
     });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      modelsRequestRef.current += 1;
+    };
   }, [loadModels, modelsRefreshKey]);
 
   // Compact error auto-dismiss

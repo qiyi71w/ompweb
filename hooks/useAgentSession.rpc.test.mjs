@@ -299,6 +299,39 @@ function primeSession(sid, messages) {
   world.agents.set(sid, { running: false, state: {} });
 }
 
+test("retained same-cwd catalogs follow session identity and ignore late old-context responses", async () => {
+  resetWorld();
+  const a = `${"a".repeat(32)}~11111111-2222-4333-8444-555555555555`;
+  const b = `${"b".repeat(32)}~22222222-3333-4444-8555-666666666666`;
+  primeSession(a, []); primeSession(b, []);
+  const catalog = id => ({ models: { [`fixture/${id}`]: id }, modelList: [{ provider: "fixture", id, name: id }], defaultModel: null });
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: async () => ({ value: catalog("profile-a") }) });
+  const hook = renderHook(({ sid, refresh }) => useAgentSession({ session: sid ? sessionInfo(sid) : null, newSessionCwd: sid ? null : "/workspace", modelsRefreshKey: refresh }), { initialProps: { sid: a, refresh: 0 } });
+  await settle();
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["profile-a"]);
+  assert.equal(new URL(callsTo("GET", "/api/models")[0].url, "http://localhost").searchParams.get("sessionId"), a);
+  let finishOld;
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: () => new Promise(resolve => { finishOld = resolve; }) });
+  hook.rerender({ sid: a, refresh: 1 });
+  await settle();
+  assert.equal(typeof finishOld, "function");
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: async () => ({ value: catalog("profile-b") }) });
+  hook.rerender({ sid: b, refresh: 1 });
+  await settle();
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["profile-b"]);
+  assert.equal(new URL(callsTo("GET", "/api/models").at(-1).url, "http://localhost").searchParams.get("sessionId"), b);
+  await act(async () => { finishOld({ value: catalog("late-profile-a") }); });
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["profile-b"]);
+  assert.equal(hook.result.current.modelsLoading, false);
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: async () => ({ value: catalog("workspace-default") }) });
+  hook.rerender({ sid: null, refresh: 1 });
+  await settle();
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["workspace-default"]);
+  const newChatQuery = new URL(callsTo("GET", "/api/models").at(-1).url, "http://localhost").searchParams;
+  assert.equal(newChatQuery.has("sessionId"), false);
+  assert.equal(newChatQuery.get("cwd"), "/workspace");
+});
+
 function saveSession(sid, messages, entryIds = messages.map((_, i) => `e${i}`)) {
   world.sessions.set(sid, { leafId: entryIds.at(-1) ?? null, messages, entryIds });
 }

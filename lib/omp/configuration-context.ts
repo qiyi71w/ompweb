@@ -54,7 +54,7 @@ export async function resolveBrowsingSessionRoot(request: ConfigurationContextRe
 
 
 /** Shares the registry's validated launch settings, never accepts browser paths/env/argv. */
-export async function resolveConfigurationContext(request: ConfigurationContextRequest = {}): Promise<OmpConfigurationContext> {
+export async function resolveConfigurationContext(request: ConfigurationContextRequest = {}, options: { refreshAgentEnv?: boolean } = {}): Promise<OmpConfigurationContext> {
   const live = request.sessionId ? getRpcSession(request.sessionId) : undefined;
   const provenance = live?.configurationContext;
   const retainedRoot = request.sessionId ? sessionRoot(request.sessionId) : undefined;
@@ -71,6 +71,15 @@ export async function resolveConfigurationContext(request: ConfigurationContextR
   const key = comparableProjectPath(cwd);
   const launch = projects.find((project) => comparableProjectPath(project.path) === key || key.startsWith(`${comparableProjectPath(project.path)}-worktrees/`))?.launchConfig;
   const env = provenance ? { ...provenance.env } : sanitizeProjectCommandEnvironment({ ...process.env, ...getAgentEnvOverrides() });
+  if (provenance && options.refreshAgentEnv) {
+    // Remove previous Web overrides as well as applying new ones. All other
+    // captured launch provenance stays pinned to the selected session.
+    for (const name of provenance.view.environmentNames) {
+      if (process.env[name] === undefined) delete env[name];
+      else env[name] = process.env[name];
+    }
+    Object.assign(env, getAgentEnvOverrides());
+  }
   let profile = normalizeProfile(launch?.profile ?? (env.OMP_PROFILE !== undefined ? env.OMP_PROFILE : env.PI_PROFILE));
   let sessionDirectory = env.PI_CODING_AGENT_SESSION_DIR;
   const configFiles = provenance ? [...provenance.view.launch.configFiles] : (env.PI_CONFIG_FILES ?? "").split(delimiter).filter(Boolean).map((file) => resolve(cwd, file.startsWith("~/") ? join(homedir(), file.slice(2)) : file));
@@ -108,7 +117,7 @@ export async function resolveConfigurationContext(request: ConfigurationContextR
   if (sessionDirectory || retainedRoot) env.PI_CODING_AGENT_SESSION_DIR = root.sessionsDir;
   env.PI_CODING_AGENT_DIR = agentDir;
   if (request.sessionId && !provenance) unknownEffectiveKeys.add("*");
-  if (configFiles.length) env.PI_CONFIG_FILES = configFiles.join(delimiter);
+  if (configFiles.length || provenance) env.PI_CONFIG_FILES = configFiles.join(delimiter);
   if (profile) { env.OMP_PROFILE = profile; env.PI_PROFILE = profile; }
   else { env.OMP_PROFILE = ""; env.PI_PROFILE = ""; }
   const binary = resolveOmpBin();

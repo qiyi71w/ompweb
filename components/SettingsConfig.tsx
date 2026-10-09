@@ -659,7 +659,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const [isPending, startTransition] = useTransition();
   useEffect(() => {
     const field = native.view?.fields.hideThinkingBlock;
-    if (field?.effective.known && typeof field.effective.value === "boolean") onHideThinkingBlockChange?.(field.effective.value);
+    const value = field?.effective.known && typeof field.effective.value === "boolean"
+      ? field.effective.value
+      : field?.native.known && typeof field.native.value === "boolean" ? field.native.value : false;
+    onHideThinkingBlockChange?.(value);
   }, [native.view, onHideThinkingBlockChange]);
 
   const checkForUpdate = useCallback(async (force = false) => {
