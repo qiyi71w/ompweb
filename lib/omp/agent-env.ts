@@ -2,10 +2,10 @@
  * Environment variables injected into the `omp` child process (issue #104).
  *
  * The values live in omp-web's own settings file (~/.omp/agent/omp-web-settings.json,
- * see lib/web-settings.ts) — omp's config.yml stays omp's. `getAgentEnvOverrides()`
- * is what lib/rpc-manager.ts hands to `new RpcProcess({ env })`; it runs inside the
- * spawn path, so it must never throw: a missing, unreadable or hand-edited settings
- * file yields `{}` and the child simply inherits process.env unchanged.
+ * see lib/web-settings.ts) — omp's config.yml stays omp's. The trusted configuration
+ * context merges `getAgentEnvOverrides()` into the sanitized spawn environment.
+ * Missing, unreadable or malformed Web settings yield no overrides; external edits
+ * are read again when resolving the next context.
  *
  * The text format and the reserved-name policy live in ./agent-env-policy.ts so the
  * settings UI can validate exactly what the server validates without pulling `fs`

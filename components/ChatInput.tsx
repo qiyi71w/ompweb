@@ -178,6 +178,7 @@ interface Props {
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: string;
+  allowThinkingInheritance?: boolean;
   onThinkingLevelChange?: (level: string) => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
@@ -219,6 +220,7 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  sessionId?: string | null;
   activeGoal?: ActiveGoal | null;
   activePlan?: ActivePlan | null;
   advisorEnabled?: boolean;
@@ -320,7 +322,7 @@ function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): Reac
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, usageLimit, fastModeSupported, onFastModeChange, slowModeSupported, slowModeEnabled, slowModeScope, onSlowModeChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
+  thinkingLevel, allowThinkingInheritance, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   toolPreset, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -339,6 +341,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onPromoteQueuedToSteer,
   draftKey = "new:unassigned",
   cwd,
+  sessionId,
   activeGoal,
   activePlan,
   advisorEnabled,
@@ -587,7 +590,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, []);
+  }, [t]);
 
   const processTextFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -645,7 +648,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
-  }, []);
+  }, [t]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -978,17 +981,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const slashMenuOpenActive = slashQuery !== null;
   useEffect(() => {
+    setDormantSkillNames(new Set());
     if (!slashMenuOpenActive || !cwd) return;
     const controller = new AbortController();
-    void fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`, { signal: controller.signal })
+    const query = new URLSearchParams({ cwd });
+    if (sessionId) query.set("sessionId", sessionId);
+    void fetch(`/api/skills?${query}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ skills?: Array<{ name?: string; disableModelInvocation?: boolean }> }> : null)
       .then((data) => {
-        if (!data) return;
+        if (!data || controller.signal.aborted) return;
         setDormantSkillNames(new Set((data.skills ?? []).flatMap((skill) => skill.disableModelInvocation && skill.name ? [skill.name] : [])));
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [cwd, slashMenuOpenActive]);
+  }, [cwd, sessionId, slashMenuOpenActive]);
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => BUILTIN_SLASH_COMMAND_DEFS
@@ -1732,12 +1738,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     : t("chatInput.compactContext");
   const thinkingDisplayLabel = (() => {
     const lvl = thinkingLevel ?? "auto";
+    if (lvl === "inherit") return t("chatInput.inheritThinking");
     if (lvl === "auto" || !thinkingLevelMap) return lvl;
     return thinkingLevelMap[lvl] ?? lvl;
   })();
   const thinkingLevelOptions = React.useMemo(
-    () => selectableThinkingLevels(availableThinkingLevels),
-    [availableThinkingLevels],
+    () => [...(allowThinkingInheritance ? ["inherit"] : []), ...selectableThinkingLevels(availableThinkingLevels)],
+    [availableThinkingLevels, allowThinkingInheritance],
   );
   // A run starting mid-interaction must not leave the reasoning menu
   // open: the level only applies to the next prompt, and the trigger is
@@ -3075,7 +3082,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       {thinkingLevelOptions.map((lvl) => {
                         const isActive = (thinkingLevel ?? "auto") === lvl;
                         const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
-                        const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
+                        const displayLabel = lvl === "inherit" ? t("chatInput.inheritThinking") : (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
                         return (
                           <button
                             className="picker-row picker-thinking-card"

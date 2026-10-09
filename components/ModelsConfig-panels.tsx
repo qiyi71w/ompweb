@@ -2,22 +2,25 @@
 
 import { useState, useEffect, useRef, type CSSProperties } from "react";
 import { useI18n } from "@/lib/i18n";
+import { useNativeSettings } from "@/hooks/useNativeSettings";
+import { isRecord } from "@/lib/type-guards";
+import { MODEL_ROLE_PREFIX, type NativeSettingView } from "@/lib/omp/settings-contract";
+import type { NativeSettingsController } from "@/hooks/useNativeSettings";
+import { splitModelThinking } from "@/lib/model-selector";
+import { NativeSettingState, NativeSettingsFields, NativeSettingsScopeBar } from "./NativeSettingsFields";
 import {
   Dialog,
   DialogContent,
   DialogTitle,
 } from "@/components/ui/primitives";
 import { Plus, Trash2, ArrowDown, ArrowUp } from "lucide-react";
-import { toast } from "@/components/ui/toast";
 import {
   NATIVE_MODEL_ROLES,
   providerInitials,
   type ApiKeyProvider,
   type ConnectedProvider,
   type IconComponent,
-  type NativeRegistrySettings,
   type OAuthProvider,
-  type RetrySettings,
   type RuntimeModelEntry,
 } from "./ModelsConfig-types";
 
@@ -81,69 +84,28 @@ export function TreeNavButton({ icon: Icon, label, selected, onClick }: { icon: 
     </button>
   );
 }
-export function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
+export function RetryFallbackDetail({ models, cwd, sessionId }: { models: RuntimeModelEntry[]; cwd?: string | null; sessionId?: string | null }) {
   const { t } = useI18n();
-  const [settings, setSettings] = useState<RetrySettings | null>(null);
+  const native = useNativeSettings(cwd, sessionId);
   const [role, setRole] = useState("default");
   const [candidate, setCandidate] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch("/api/omp-settings")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { settings?: RetrySettings }) => setSettings(data.settings ?? {}))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, []);
-
-  // Serialize full-snapshot saves: each call writes the whole settings object,
-  // so overlapping PUTs can land out of order and clobber newer changes. Keep
-  // the latest snapshot and drain a single serialized save always writing the
-  // most recent state (fixes rapid fallback-chain edits scheduling stale writes).
-  const latestRef = useRef<RetrySettings | null>(null);
-  const drainingRef = useRef(false);
-  const save = (next: RetrySettings) => {
-    setSettings(next);
-    setError(null);
-    latestRef.current = next;
-    if (drainingRef.current) return;
-    drainingRef.current = true;
-    void (async () => {
-      try {
-        while (latestRef.current !== null) {
-          const snapshot = latestRef.current;
-          latestRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = await response.json() as { settings?: RetrySettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            if (latestRef.current === null) setSettings(data.settings ?? snapshot);
-          } catch (reason) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-            break;
-          }
-        }
-      } finally {
-        drainingRef.current = false;
-      }
-    })();
-  };
-
-  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.retryLoading")}</div>;
-  const retry = settings.retry ?? {};
-  const chain = retry.fallbackChains?.[role] ?? [];
+  const field = native.view?.fields["retry.fallbackChains"];
+  const rawChains = field?.saved.exists ? field.saved.value : undefined;
+  const fallbackChains: Record<string, string[]> = {};
+  if (isRecord(rawChains)) for (const [name, chain] of Object.entries(rawChains)) {
+    if (Array.isArray(chain) && chain.every((value): value is string => typeof value === "string")) fallbackChains[name] = chain;
+  }
+  const chain = fallbackChains[role] ?? [];
   const modelOptions = models.map((model) => `${model.provider}/${model.id}`);
-  const updateChain = (next: string[]) => void save({ ...settings, retry: { ...retry, fallbackChains: { ...(retry.fallbackChains ?? {}), [role]: next } } });
+  const updateChain = (next: string[]) => { if (!disabled) void native.set("retry.fallbackChains", { ...fallbackChains, [role]: next }); };
+  const disabled = !field?.editable || native.loading || native.saving || !!native.conflicts.length;
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <NativeSettingsScopeBar controller={native} workspace={!!cwd} />
     <div><SectionTitle>{t("modelsConfig.retryFallbackTitle")}</SectionTitle><p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.retryFallbackDesc")}</p></div>
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, enabled: event.target.checked } })} /> {t("modelsConfig.retryTransientErrors")}</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, modelFallback: event.target.checked } })} /> {t("modelsConfig.allowModelFallback")}</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.retryAttempts")} <select value={retry.maxRetries ?? 10} onChange={(event) => void save({ ...settings, retry: { ...retry, maxRetries: Number(event.target.value) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[0, 1, 2, 3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.returnToPrimary")} <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: event.target.value as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="cooldown-expiry">{t("modelsConfig.afterCooldown")}</option><option value="never">{t("modelsConfig.never")}</option></select></label>
-    </div>
-    <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.fallbackChainFor")}</span><select aria-label={t("modelsConfig.fallbackChainFor")} value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{NATIVE_MODEL_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
+    <NativeSettingsFields controller={native} keys={["retry.enabled", "retry.modelFallback", "retry.maxRetries", "retry.fallbackRevertPolicy", "retry.fallbackChains"]} />
+    <fieldset aria-disabled={disabled} onClickCapture={(event) => { if (disabled) { event.preventDefault(); event.stopPropagation(); } }} onChangeCapture={(event) => { if (disabled) event.stopPropagation(); }} style={{ margin: 0, padding: 0, minWidth: 0, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
+      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.fallbackChainFor")}</span><select aria-label={t("modelsConfig.fallbackChainFor")} value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[...new Set([...NATIVE_MODEL_ROLES, ...Object.keys(fallbackChains)])].map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
       <div style={{ padding: 12, display: "flex", gap: 8 }}><select aria-label={t("modelsConfig.selectFallbackModel")} value={candidate} onChange={(event) => setCandidate(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="">{t("modelsConfig.selectFallbackModel")}</option>{modelOptions.filter((value) => !chain.includes(value)).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "white", cursor: "pointer", fontSize: 12 }}>{t("modelsConfig.add")}</button></div>
       {chain.length === 0 ? (
         <div style={{ padding: "0 12px 12px", color: "var(--text-dim)", fontSize: 12 }}>{t("modelsConfig.noExplicitChain")}</div>
@@ -153,176 +115,131 @@ export function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] })
             <div key={selector} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}>
               <span style={{ width: 18, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{index + 1}</span>
               <code style={{ flex: 1 }}>{selector}</code>
-              <button type="button" aria-label={`Move ${selector} up`} title={`Move ${selector} up`} disabled={index === 0} onClick={() => { const next = [...chain]; const previous = next[index - 1]; next[index - 1] = next[index]; next[index] = previous; updateChain(next); }} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: index === 0 ? "default" : "pointer" }}><ArrowUp size={14} /></button>
-              <button type="button" aria-label={`Move ${selector} down`} title={`Move ${selector} down`} disabled={index === chain.length - 1} onClick={() => { const next = [...chain]; const following = next[index + 1]; next[index + 1] = next[index]; next[index] = following; updateChain(next); }} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: index === chain.length - 1 ? "default" : "pointer" }}><ArrowDown size={14} /></button>
+              <button type="button" aria-label={t("settingsConfig.moveCompactionMethodUp", { method: selector })} aria-disabled={disabled || index === 0} onClick={() => { if (disabled || index === 0) return; const next = [...chain]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; updateChain(next); }} className="settings-back ui-focus-ring"><ArrowUp size={14} /></button>
+              <button type="button" aria-label={t("settingsConfig.moveCompactionMethodDown", { method: selector })} aria-disabled={disabled || index === chain.length - 1} onClick={() => { if (disabled || index === chain.length - 1) return; const next = [...chain]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; updateChain(next); }} className="settings-back ui-focus-ring"><ArrowDown size={14} /></button>
               <button type="button" aria-label={`Remove ${selector} from chain`} title={`Remove ${selector}`} onClick={() => updateChain(chain.filter((value) => value !== selector))} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={14} /></button>
             </div>
           ))}
         </div>
       )}
-    </section>
-    {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
+    </fieldset>
   </div>;
 }
-export function NativeRegistryDetail({ models, connectedProviders, onChanged }: { models: RuntimeModelEntry[]; connectedProviders: ConnectedProvider[]; onChanged: () => Promise<void> }) {
+export function NativeRegistryDetail({ models, connectedProviders, onChanged, cwd, sessionId }: { models: RuntimeModelEntry[]; connectedProviders: ConnectedProvider[]; onChanged: () => Promise<void>; cwd?: string | null; sessionId?: string | null }) {
   const { t } = useI18n();
-  const [settings, setSettings] = useState<NativeRegistrySettings | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    fetch("/api/omp-settings")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { settings?: NativeRegistrySettings }) => setSettings(data.settings ?? {}))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, []);
-
-  // Serialize full-snapshot saves: each call PUTs the whole settings object and
-  // a rapid sequence of provider/model toggles must not let an older snapshot
-  // land after a newer one. Keep the latest snapshot and drain a single
-  // serialized save loop so the most recent state wins on the server.
-  const latestRef = useRef<NativeRegistrySettings | null>(null);
-  const drainingRef = useRef(false);
-  const save = (next: NativeRegistrySettings) => {
-    setSettings(next);
-    setSaving(true);
-    setError(null);
-    latestRef.current = next;
-    if (drainingRef.current) return;
-    drainingRef.current = true;
-    void (async () => {
-      try {
-        while (latestRef.current !== null) {
-          const snapshot = latestRef.current;
-          latestRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = await response.json() as { settings?: NativeRegistrySettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            if (latestRef.current === null) setSettings(data.settings ?? snapshot);
-            await onChanged();
-          } catch (reason) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-            break;
-          }
-        }
-      } finally {
-        drainingRef.current = false;
-        setSaving(false);
-      }
-    })();
+  const native = useNativeSettings(cwd, sessionId);
+  const keys = ["enabledModels", "enabledProviders", "disabledProviders", "modelProviderOrder"];
+  const list = (key: string): string[] => {
+    const field = native.view?.fields[key];
+    const value = field?.saved.exists ? field.saved.value : undefined;
+    return Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : [];
+  };
+  const isReadOnly = keys.some((key) => !native.view?.fields[key]?.editable);
+  const disabled = native.loading || native.saving || !!native.conflicts.length || isReadOnly;
+  const allModelKeys = models.map((model) => `${model.provider}/${model.id}`);
+  const selectedModels = list("enabledModels");
+  const allowListEnabled = selectedModels.length > 0;
+  const enabledModels = new Set(selectedModels);
+  const disabledProviders = new Set(list("disabledProviders"));
+  const providers = [...new Set([...models.map((model) => model.provider), ...connectedProviders.map((provider) => provider.id), ...disabledProviders])].sort();
+  const providerOrder = list("modelProviderOrder");
+  const orderedProviders = [...providerOrder, ...providers.filter((provider) => !providerOrder.includes(provider))];
+  const save = async (key: string, value: string[]) => { if (!disabled && await native.set(key, value)) await onChanged(); };
+  const state = (key: string) => {
+    const field = native.view?.fields[key];
+    return field ? <div style={{ padding: 12 }}><NativeSettingState controller={native} field={field} /></div> : null;
+  };
+  const move = (index: number, delta: -1 | 1) => {
+    if (disabled || index + delta < 0 || index + delta >= orderedProviders.length) return;
+    const next = [...orderedProviders];
+    const moved = next[index];
+    const neighbor = next[index + delta];
+    [next[index + delta], next[index]] = [next[index], next[index + delta]];
+    void save("modelProviderOrder", next.filter((provider) => providerOrder.includes(provider) || provider === moved || provider === neighbor));
   };
 
-  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.registryLoading")}</div>;
-  const isReadOnly = settings.registryHasScopedEntries === true;
-  const allModelKeys = models.map((model) => `${model.provider}/${model.id}`);
-  const allowListEnabled = (settings.enabledModels?.length ?? 0) > 0;
-  const enabledModels = new Set(settings.enabledModels ?? allModelKeys);
-  const providers = [...new Set([...models.map((model) => model.provider), ...connectedProviders.map((provider) => provider.id), ...(settings.disabledProviders ?? [])])].sort();
-  const disabledProviders = new Set(settings.disabledProviders ?? []);
-  const providerOrder = settings.modelProviderOrder ?? [];
-  const orderedProviders = [...providerOrder, ...providers.filter((provider) => !providerOrder.includes(provider))];
-
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-    <div>
-      <SectionTitle>{t("modelsConfig.nativeRegistryTitle")}</SectionTitle>
-      <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.nativeRegistryDesc")}</p>
-    </div>
+    <NativeSettingsScopeBar controller={native} workspace={!!cwd} />
+    <div><SectionTitle>{t("modelsConfig.nativeRegistryTitle")}</SectionTitle><p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.nativeRegistryDesc")}</p></div>
+    <NativeSettingsFields controller={native} keys={["enabledProviders"]} />
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}><input type="checkbox" checked={allowListEnabled} disabled={saving || isReadOnly} onChange={(event) => void save({ ...settings, enabledModels: event.target.checked ? allModelKeys : [] })} /> {t("modelsConfig.restrictSelectedModels")}</label>
-      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{allowListEnabled ? t("modelsConfig.uncheckedUnavailable") : t("modelsConfig.allModelsAllowed")}</p>
-      {allowListEnabled && <div style={{ maxHeight: 260, overflowY: "auto", borderTop: "1px solid var(--border)" }}>{models.map((model) => {
+      <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}><input type="checkbox" checked={allowListEnabled} disabled={disabled} onChange={(event) => void save("enabledModels", event.target.checked ? allModelKeys : [])} /> {t("modelsConfig.restrictSelectedModels")}</label>
+      {state("enabledModels")}
+      {!isReadOnly && <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{allowListEnabled ? t("modelsConfig.uncheckedUnavailable") : t("modelsConfig.allModelsAllowed")}</p>}
+      {allowListEnabled && !isReadOnly && <div style={{ maxHeight: 260, overflowY: "auto", borderTop: "1px solid var(--border)" }}>{models.map((model) => {
         const key = `${model.provider}/${model.id}`;
-        return <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={enabledModels.has(key)} disabled={saving || isReadOnly} onChange={(event) => { const next = new Set(enabledModels); if (event.target.checked) next.add(key); else next.delete(key); void save({ ...settings, enabledModels: [...next] }); }} /><code>{key}</code></label>;
+        return <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={enabledModels.has(key)} disabled={disabled} onChange={(event) => { const next = new Set(enabledModels); if (event.target.checked) next.add(key); else next.delete(key); void save("enabledModels", [...next]); }} /><code>{key}</code></label>;
       })}</div>}
     </section>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
       <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.disabledProviders")}</div>
       <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{t("modelsConfig.disabledProvidersDesc")}</p>
-      <div style={{ borderTop: "1px solid var(--border)" }}>{providers.map((provider) => <label key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={disabledProviders.has(provider)} disabled={saving || isReadOnly} onChange={(event) => { const next = new Set(disabledProviders); if (event.target.checked) next.add(provider); else next.delete(provider); void save({ ...settings, disabledProviders: [...next] }); }} /><ProviderIcon id={provider} size={14} /><code>{provider}</code></label>)}</div>
+      {state("disabledProviders")}
+      {!isReadOnly && <div style={{ borderTop: "1px solid var(--border)" }}>{providers.map((provider) => <label key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={disabledProviders.has(provider)} disabled={disabled} onChange={(event) => { const next = new Set(disabledProviders); if (event.target.checked) next.add(provider); else next.delete(provider); void save("disabledProviders", [...next]); }} /><ProviderIcon id={provider} size={14} /><code>{provider}</code></label>)}</div>}
     </section>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
       <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.providerPreference")}</div>
       <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{t("modelsConfig.providerPreferenceDesc")}</p>
-      <div style={{ borderTop: "1px solid var(--border)" }}>{orderedProviders.map((provider, index) => <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><ProviderIcon id={provider} size={14} /><code style={{ flex: 1 }}>{provider}</code><button type="button" disabled={saving || isReadOnly || index === 0} onClick={() => { const next = [...orderedProviders]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; void save({ ...settings, modelProviderOrder: next }); }} title={t("modelsConfig.moveProviderUp")} aria-label={t("modelsConfig.moveProviderUp")} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowUp size={14} /></button><button type="button" disabled={saving || isReadOnly || index === orderedProviders.length - 1} onClick={() => { const next = [...orderedProviders]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; void save({ ...settings, modelProviderOrder: next }); }} title={t("modelsConfig.moveProviderDown")} aria-label={t("modelsConfig.moveProviderDown")} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowDown size={14} /></button></div>)}</div>
+      {state("modelProviderOrder")}
+      {!isReadOnly && <div style={{ borderTop: "1px solid var(--border)" }}>{orderedProviders.map((provider, index) => <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}>
+        <ProviderIcon id={provider} size={14} /><code style={{ flex: 1 }}>{provider}</code>
+        <button type="button" aria-disabled={disabled || index === 0} onClick={() => move(index, -1)} title={t("modelsConfig.moveProviderUp")} aria-label={t("modelsConfig.moveProviderUp")} className="settings-back ui-focus-ring"><ArrowUp size={14} /></button>
+        <button type="button" aria-disabled={disabled || index === orderedProviders.length - 1} onClick={() => move(index, 1)} title={t("modelsConfig.moveProviderDown")} aria-label={t("modelsConfig.moveProviderDown")} className="settings-back ui-focus-ring"><ArrowDown size={14} /></button>
+      </div>)}</div>}
     </section>
-    {isReadOnly && <div role="status" style={{ padding: "9px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.45 }}>{t("modelsConfig.pathScopedNotice")}</div>}
-    {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
   </div>;
 }
-export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
+export function ModelRolesDetail({ models, cwd, sessionId }: { models: RuntimeModelEntry[]; cwd?: string; sessionId?: string }) {
   const { t } = useI18n();
-  const [roles, setRoles] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+  const native = useNativeSettings(cwd, sessionId);
+  const initialized = useRef<string | null>(null);
   useEffect(() => {
-    fetch("/api/model-roles")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { roles?: Record<string, string> }) => setRoles(data.roles ?? {}))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-      .finally(() => setLoading(false));
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const response = await fetch("/api/model-roles", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles }) });
-      const data = await response.json() as { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      toast.success(t("modelsConfig.rolesSaved"));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const updateRoleModel = (role: string, modelValue: string) => {
-    const current = roles[role] ?? "";
-    const effort = current.match(/:([^,:]+)$/)?.[1] ?? "";
-    setRoles((values) => ({ ...values, [role]: modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "" }));
-  };
-
-  const updateRoleThinking = (role: string, effort: string) => {
-    const current = roles[role] ?? "";
-    const modelValue = current.replace(/:([^,:]+)$/, "");
-    setRoles((values) => ({ ...values, [role]: modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "" }));
-  };
-
+    if (!native.view || initialized.current === native.view.context.id) return;
+    initialized.current = native.view.context.id;
+    if (cwd && native.view.fields.modelRoleStorage?.effective.value === "project") native.setScope("project");
+  }, [native, cwd]);
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-    <div>
-      <SectionTitle>{t("modelsConfig.modelRolesTitle")}</SectionTitle>
-      <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{t("modelsConfig.modelRolesDesc")}</p>
-    </div>
-    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.loadingRoles")}</div> : NATIVE_MODEL_ROLES.map((role) => (
-      <div key={role} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "82px minmax(0, 1fr) minmax(110px, 0.35fr)", alignItems: "center", gap: 10, fontSize: 12 }}>
-        <code style={{ color: "var(--text-muted)" }}>{role}</code>
-        {(() => {
-          const raw = roles[role] ?? "";
-          const selectedModel = raw.replace(/:([^,:]+)$/, "");
-          const selectedThinking = raw.match(/:([^,:]+)$/)?.[1] ?? "";
-          const model = models.find((item) => `${item.provider}/${item.id}` === selectedModel);
-          const modelKnown = !selectedModel || Boolean(model);
-          return <>
-            <select aria-label={`Model override for ${role}`} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
-              <option value="">{t("modelsConfig.noOverride")}</option>
-              {!modelKnown && <option value={selectedModel}>{selectedModel} (not currently available)</option>}
-              {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
-            </select>
-            <select aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
-              <option value="">{t("modelsConfig.modelDefault")}</option>
-              {(model?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level}>{level}</option>)}
-            </select>
-          </>;
-        })()}
-      </div>
-    ))}
-    {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
-    <button type="button" onClick={() => void save()} disabled={loading || saving} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>{saving ? t("modelsConfig.saving") : t("modelsConfig.saveRoles")}</button>
+    <NativeSettingsScopeBar controller={native} workspace={!!cwd} />
+    <SectionTitle>{t("modelsConfig.modelRolesTitle")}</SectionTitle>
+    <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.modelRolesDesc")}</p>
+    <NativeSettingsFields controller={native} keys={["modelRoleStorage"]} />
+    {Object.values(native.view?.fields ?? {}).filter((field) => field.key.startsWith(MODEL_ROLE_PREFIX)).map((field) => <RoleEditor key={`${native.view!.context.id}:${native.scope}:${field.key}`} controller={native} field={field} models={models} />)}
   </div>;
+}
+
+function RoleEditor({ controller, field, models }: { controller: NativeSettingsController; field: NativeSettingView; models: RuntimeModelEntry[] }) {
+  const { t } = useI18n();
+  const role = field.key.slice(MODEL_ROLE_PREFIX.length);
+  const raw = field.saved.exists ? field.saved.value : undefined;
+  const saved = typeof raw === "string" ? raw : "";
+  const [previous, setPrevious] = useState(saved);
+  const [draft, setDraft] = useState(saved);
+  if (previous !== saved) {
+    setPrevious(saved);
+    if (!controller.conflicts.length) setDraft(saved);
+  }
+  const options = models.map((model) => `${model.provider}/${model.id}`);
+  const parsed = splitModelThinking(draft, options);
+  const model = models.find((item) => `${item.provider}/${item.id}` === parsed.model);
+  const levels = [...new Set(["off", "auto", "inherit", ...(model?.thinkingLevels ?? []), ...(parsed.thinking ? [parsed.thinking] : [])])];
+  const disabled = !field.editable || controller.loading || controller.saving || !!controller.conflicts.length;
+  const style: CSSProperties = { minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 };
+  return <section className="settings-card" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+    <code>{role}</code>
+    <NativeSettingState controller={controller} field={field} />
+    <form onSubmit={(event) => { event.preventDefault(); if (!disabled && draft.trim()) void controller.set(field.key, draft); }} style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+      <input aria-label={t("modelsConfig.roleSelector", { role })} value={draft} onChange={(event) => { if (!disabled) setDraft(event.target.value); }} readOnly={disabled} aria-disabled={disabled} style={{ ...style, flex: "1 1 240px" }} />
+      <select aria-label={t("modelsConfig.roleModel", { role })} value={parsed.model} aria-disabled={disabled} onChange={(event) => { if (!disabled) setDraft(`${event.target.value}${parsed.thinking ? `:${parsed.thinking}` : ""}`); }} style={style}>
+        {!options.includes(parsed.model) && <option value={parsed.model}>{parsed.model || t("nativeSettings.inherited")}</option>}
+        {options.map((value) => <option key={value} value={value}>{value}</option>)}
+      </select>
+      <select aria-label={t("modelsConfig.roleThinking", { role })} value={parsed.thinking} aria-disabled={disabled || !parsed.model} onChange={(event) => { if (!disabled && parsed.model) setDraft(`${parsed.model}${event.target.value ? `:${event.target.value}` : ""}`); }} style={style}>
+        <option value="">{t("modelsConfig.modelDefault")}</option>
+        {levels.map((level) => <option key={level} value={level}>{level}</option>)}
+      </select>
+      <button type="submit" aria-disabled={disabled || !draft.trim()} className="settings-back ui-focus-ring">{t("nativeSettings.set")}</button>
+    </form>
+  </section>;
 }
 // ── API Key detail ────────────────────────────────────────────────────────────
 // omp keeps API keys in its own encrypted credential store (agent.db), which

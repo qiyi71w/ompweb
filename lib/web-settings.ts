@@ -33,17 +33,19 @@ function settingsPath(): string {
 
 declare global {
   // Shared across module instances (instrumentation and route bundles).
-  var __ompWebSettingsCache: { path: string; settings: WebServerSettings } | undefined;
+  var __ompWebSettingsCache: { path: string; content: string | undefined; settings: WebServerSettings } | undefined;
 }
 
 export function loadWebServerSettings(): WebServerSettings {
   const path = settingsPath();
+  let content: string | undefined;
+  try { content = readFileSync(path, "utf8"); } catch {}
   const cached = globalThis.__ompWebSettingsCache;
-  if (cached?.path === path) return cached.settings;
+  if (cached?.path === path && cached.content === content) return cached.settings;
   let settings = DEFAULTS;
   try {
-    if (existsSync(path)) {
-      const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (content !== undefined) {
+      const raw: unknown = JSON.parse(content);
       if (isRecord(raw)) {
         settings = {
           autoResumeSessions: raw.autoResumeSessions === true,
@@ -54,7 +56,7 @@ export function loadWebServerSettings(): WebServerSettings {
   } catch {
     // Unreadable settings fall back to the defaults.
   }
-  globalThis.__ompWebSettingsCache = { path, settings };
+  globalThis.__ompWebSettingsCache = { path, content, settings };
   return settings;
 }
 
@@ -74,6 +76,6 @@ export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebSer
       // ignore cleanup failures
     }
   }
-  globalThis.__ompWebSettingsCache = { path, settings };
+  globalThis.__ompWebSettingsCache = undefined;
   return settings;
 }

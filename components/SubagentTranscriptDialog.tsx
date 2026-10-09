@@ -80,10 +80,9 @@ const BLOCK_LABEL_STYLE: React.CSSProperties = {
 export function SubagentModel({ resolvedModel }: { resolvedModel?: string }) {
   const { t } = useI18n();
   const items = [
-    [t("subagentTranscript.modelLabel"), fullModel(resolvedModel)],
+    [t("subagentTranscript.modelLabel"), fullModel(resolvedModel) || t("nativeSettings.unknown")],
     [t("subagentTranscript.effortLabel"), modelEffort(resolvedModel)],
   ].filter((item): item is [string, string] => Boolean(item[1]));
-  if (items.length === 0) return null;
   return (
     <dl style={{ display: "flex", flexWrap: "wrap", gap: "2px 12px", margin: "2px 0", fontSize: 11, fontFamily: "var(--font-mono)" }}>
       {items.map(([label, value]) => (

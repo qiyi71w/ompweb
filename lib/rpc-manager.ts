@@ -1,12 +1,11 @@
-import { randomUUID } from "crypto";
-import { existsSync, realpathSync } from "fs";
+import { createHash, randomUUID } from "crypto";
+import { existsSync } from "fs";
 import { homedir } from "os";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
-import { readNativeSettings } from "./omp/settings-config";
-import { getAgentEnvOverrides } from "./omp/agent-env";
+import { resolveConfigurationContext, type OmpConfigurationContext } from "./omp/configuration-context";
 import {
   cacheSessionPath,
   invalidateSessionEntriesCache,
@@ -17,11 +16,9 @@ import {
 } from "./session-reader";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
 import { PRESET_FULL } from "./tool-presets";
-import { comparableProjectPath } from "./comparable-path";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
-import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import type {
   BashResultInfo,
   OmpModel,
@@ -30,8 +27,9 @@ import type {
   SessionStatsInfo,
   WebSessionState,
 } from "./pi-types";
-import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem, ProjectLaunchConfig } from "./types";
+import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
+import { nativeSessionId, qualifySessionId, sessionFileBelongsToRoot } from "./session-reference";
 
 // ============================================================================
 // Types
@@ -194,8 +192,8 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
-  const args: string[] = [];
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchArgs: readonly string[] = []): string[] {
+  const args: string[] = [...launchArgs];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
     // omp's createSessionManager opens it directly via SessionManager.open
@@ -214,12 +212,6 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
     }
   }
   if (advisor) args.push("--advisor");
-  else if (launchConfig?.advisor) args.push("--advisor");
-  // Defense in depth: the registry is hand-editable, so re-strip reserved
-  // args and dash-leading profiles at the spawn boundary even though the
-  // API validates them on write.
-  if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
-  if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
   return args;
 }
 
@@ -363,6 +355,7 @@ export class AgentSessionWrapper {
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
   private readonly recordedCwd: string | null;
+  private _configurationContext: OmpConfigurationContext | undefined;
 
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
@@ -375,13 +368,21 @@ export class AgentSessionWrapper {
     /** Test seam: the real value is DISCONNECT_DESTROY_MS (120s), far too long
      *  for a unit test. 0 disables reaping for that wrapper. */
     disconnectDestroyMs: number = DISCONNECT_DESTROY_MS,
+    configurationContext?: OmpConfigurationContext,
   ) {
     this.proc = proc;
+    this._configurationContext = configurationContext;
     this.cwd = cwd;
     this.recordedCwd = recordedCwd ?? null;
     this.advisorSpawned = advisorSpawned;
     this._sessionId = expectedSessionId;
     this.disconnectDestroyMs = disconnectDestroyMs;
+  }
+
+  /** Actual server-only spawn provenance, unchanged by later configuration saves. */
+  get configurationContext(): OmpConfigurationContext {
+    if (!this._configurationContext) throw new Error("Process context unavailable");
+    return this._configurationContext;
   }
 
   get sessionId(): string {
@@ -541,7 +542,10 @@ export class AgentSessionWrapper {
 
   private applyIdentity(state: RpcSessionState): void {
     const oldId = this._sessionId;
-    const identityChanged = Boolean(oldId) && (state.sessionId !== oldId || (state.sessionFile && state.sessionFile !== this._sessionFile));
+    const root = this._configurationContext?.sessionRoot;
+    if (root && state.sessionFile && !sessionFileBelongsToRoot(state.sessionFile, root)) throw new Error("Native session is outside its configuration root");
+    const reference = root ? qualifySessionId(root, state.sessionId) : state.sessionId;
+    const identityChanged = Boolean(oldId) && (reference !== oldId || (state.sessionFile && state.sessionFile !== this._sessionFile));
     // omp >= 18.5 moves a session it does not own onto a new file on its first
     // write (`session-persistence` notice). The conversation continues, so the
     // live stream and run state must survive; only the id changes.
@@ -553,7 +557,7 @@ export class AgentSessionWrapper {
       this.awaitingAgentStartDeadline = 0;
       this.continuationGraceUntil = 0;
     }
-    this._sessionId = state.sessionId;
+    this._sessionId = reference;
     this._sessionFile = state.sessionFile ?? "";
     this._sessionName = state.sessionName;
     this.streaming = state.isStreaming;
@@ -774,10 +778,7 @@ export class AgentSessionWrapper {
         break;
       }
       case "extension_ui_request": {
-        if (this.trackExtensionUiRequest(event)) {
-          notifyRunningChange();
-          return;
-        }
+        this.trackExtensionUiRequest(event);
         break;
       }
       case "host_tool_call": {
@@ -875,25 +876,12 @@ export class AgentSessionWrapper {
     this.pendingUiRequests.clear();
   }
 
-  private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
+  private trackExtensionUiRequest(event: UnsequencedAgentEvent): void {
     const method = event.method as string;
     const id = event.id as string;
     if (method === "cancel") {
       this.forgetPendingUiRequest(event.targetId as string);
-      return false;
-    }
-    // Only the “Allow tool: <name>” confirmation is covered. Other extension
-    // prompts, including login/editor confirmations, remain interactive.
-    let autoApproveExtension = false;
-    try {
-      autoApproveExtension = readNativeSettings().settings.tools?.approval?.extension === "allow";
-    } catch {
-      // A malformed config must not prevent normal interactive approval.
-    }
-    if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && autoApproveExtension) {
-      this.forgetPendingUiRequest(id);
-      this.proc.sendFrame({ type: "extension_ui_response", id, confirmed: true });
-      return true;
+      return;
     }
     if (PENDING_UI_METHODS.has(method)) {
       this.forgetPendingUiRequest(id);
@@ -905,14 +893,14 @@ export class AgentSessionWrapper {
         this.uiExpiryTimers.set(id, timer);
       }
       this.pendingUiRequests.set(id, event);
-      return false;
+      return;
     }
     if (method === "setStatus") {
       const key = event.statusKey as string;
       const text = event.statusText as string | undefined;
       if (text === undefined) this.extensionStatuses.delete(key);
       else this.extensionStatuses.set(key, text);
-      return false;
+      return;
     }
     if (method === "setWidget") {
       const key = event.widgetKey as string;
@@ -927,7 +915,6 @@ export class AgentSessionWrapper {
         });
       }
     }
-    return false;
   }
 
   /**
@@ -994,6 +981,9 @@ export class AgentSessionWrapper {
     // `web` belongs to this wrapper, never to native/extension-supplied frames.
     // Strip it before caching tool snapshots as well as before wire emission.
     delete event.web;
+    if (typeof event.sessionId === "string" && this._configurationContext) {
+      event.sessionId = qualifySessionId(this._configurationContext.sessionRoot, event.sessionId);
+    }
     switch (event.type) {
       case "agent_start":
         this.responseObserved = false;
@@ -1279,7 +1269,7 @@ export class AgentSessionWrapper {
     }
     const skillDiagnostics = parseSkillDiagnosticsSnapshot(state.skillDiagnostics);
     return {
-      sessionId: state.sessionId,
+      sessionId: this._sessionId,
       sessionFile: state.sessionFile ?? "",
       sessionName: state.sessionName,
       isStreaming: state.isStreaming,
@@ -1389,17 +1379,20 @@ export class AgentSessionWrapper {
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
+      const context = await resolveConfigurationContext({ cwd: this.cwd, sessionId: this.sessionId }, { refreshAgentEnv: true });
+      context.launchArgs = buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, context.launchArgs);
+      context.processIdentity = createHash("sha256").update(context.processIdentity).update(JSON.stringify(context.launchArgs)).digest("hex");
       const proc = new RpcProcess({
-        cwd: this.cwd,
-        // Re-read per spawn so a restart picks up environment values the user
-        // added in Settings after this session was created (#104).
-        env: getAgentEnvOverrides(),
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        cwd: context.view.cwd,
+        binary: context.view.binary,
+        environment: context.env,
+        extraArgs: context.launchArgs,
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
       });
       this.proc = proc;
+      this._configurationContext = context;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       try {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
@@ -1788,6 +1781,9 @@ export class AgentSessionWrapper {
             type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : undefined,
           );
           if (type === "set_thinking_level") this.invalidateSessionLists();
+          if (type === "get_messages_page" && isRecord(result) && typeof result.sessionId === "string" && this._configurationContext) {
+            return { ...result, sessionId: qualifySessionId(this._configurationContext.sessionRoot, result.sessionId) };
+          }
           return result ?? null;
         }
         throw new Error(`Unsupported command: ${type}`);
@@ -2035,17 +2031,6 @@ export async function resumeInterruptedSessions(): Promise<void> {
   }));
 }
 
-/** Look up the workspace-registered launch config; unregistered projects attach none. */
-function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
-  let canonical = cwd;
-  try { canonical = realpathSync(cwd); } catch {}
-  const key = comparableProjectPath(canonical);
-  return loadProjectRegistry().projects.find((project) => {
-    if (project.hidden) return false;
-    const projectKey = comparableProjectPath(project.path);
-    return projectKey === key || key.startsWith(`${projectKey}-worktrees/`);
-  })?.launchConfig;
-}
 
 /**
  * Get or create the omp RPC process for the given session.
@@ -2064,16 +2049,14 @@ export async function startRpcSession(
   /** The cwd recorded in the session file header, used to detect a spawn
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
-  launchConfig?: ProjectLaunchConfig,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
-  launchConfig = launchConfig ?? launchConfigForCwd(cwd);
-  // Union semantics, matching the spawn below and the wrapper identity:
-  // workspace advisor=true forces the flag on. The gate must compare this
-  // same effective value — comparing the raw toggle would destroy+respawn a
-  // workspace-forced child on every toggle-off prompt.
-  const effectiveAdvisor = advisor === true || launchConfig?.advisor === true;
+  const context = await resolveConfigurationContext({ cwd, sessionId: sessionFile ? sessionId : undefined });
+  const root = context.sessionRoot;
+  sessionId = qualifySessionId(root, nativeSessionId(sessionId));
+  if (sessionFile && !sessionFileBelongsToRoot(sessionFile, root)) throw new Error("Session file does not belong to the requested root");
+  const effectiveAdvisor = advisor === true || context.launchArgs.includes("--advisor");
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) {
@@ -2098,7 +2081,7 @@ export async function startRpcSession(
   // live wrapper that already reports this file (e.g. after it moved files).
   if (sessionFile && !existing) {
     for (const candidate of new Set(registry.values())) {
-      if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
+      if (candidate.isAlive() && candidate.configurationContext.sessionRoot.token === root.token && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
         registry.set(sessionId, candidate);
         return { session: candidate, realSessionId: candidate.sessionId };
       }
@@ -2112,19 +2095,23 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
+    context.launchArgs = buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, context.launchArgs);
+    context.processIdentity = createHash("sha256").update(context.processIdentity).update(JSON.stringify(context.launchArgs)).digest("hex");
     const proc = new RpcProcess({
-      cwd,
-      // User-configured variables for MCP servers and generated configs (#104).
-      env: getAgentEnvOverrides(),
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
+      cwd: context.view.cwd,
+      binary: context.view.binary,
+      environment: context.env,
+      extraArgs: context.launchArgs,
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
       proc,
       cwd,
       recordedCwd,
-      advisor === true || launchConfig?.advisor === true,
+      effectiveAdvisor,
       sessionFile ? sessionId : "",
+      DISCONNECT_DESTROY_MS,
+      context,
     );
     holder.wrapper = created;
     created.start();

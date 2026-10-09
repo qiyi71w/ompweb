@@ -299,6 +299,39 @@ function primeSession(sid, messages) {
   world.agents.set(sid, { running: false, state: {} });
 }
 
+test("retained same-cwd catalogs follow session identity and ignore late old-context responses", async () => {
+  resetWorld();
+  const a = `${"a".repeat(32)}~11111111-2222-4333-8444-555555555555`;
+  const b = `${"b".repeat(32)}~22222222-3333-4444-8555-666666666666`;
+  primeSession(a, []); primeSession(b, []);
+  const catalog = id => ({ models: { [`fixture/${id}`]: id }, modelList: [{ provider: "fixture", id, name: id }], defaultModel: null });
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: async () => ({ value: catalog("profile-a") }) });
+  const hook = renderHook(({ sid, refresh }) => useAgentSession({ session: sid ? sessionInfo(sid) : null, newSessionCwd: sid ? null : "/workspace", modelsRefreshKey: refresh }), { initialProps: { sid: a, refresh: 0 } });
+  await settle();
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["profile-a"]);
+  assert.equal(new URL(callsTo("GET", "/api/models")[0].url, "http://localhost").searchParams.get("sessionId"), a);
+  let finishOld;
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: () => new Promise(resolve => { finishOld = resolve; }) });
+  hook.rerender({ sid: a, refresh: 1 });
+  await settle();
+  assert.equal(typeof finishOld, "function");
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: async () => ({ value: catalog("profile-b") }) });
+  hook.rerender({ sid: b, refresh: 1 });
+  await settle();
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["profile-b"]);
+  assert.equal(new URL(callsTo("GET", "/api/models").at(-1).url, "http://localhost").searchParams.get("sessionId"), b);
+  await act(async () => { finishOld({ value: catalog("late-profile-a") }); });
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["profile-b"]);
+  assert.equal(hook.result.current.modelsLoading, false);
+  world.holds.push({ match: (_, url) => url.startsWith("/api/models"), produce: async () => ({ value: catalog("workspace-default") }) });
+  hook.rerender({ sid: null, refresh: 1 });
+  await settle();
+  assert.deepEqual(hook.result.current.modelList.map(m => m.id), ["workspace-default"]);
+  const newChatQuery = new URL(callsTo("GET", "/api/models").at(-1).url, "http://localhost").searchParams;
+  assert.equal(newChatQuery.has("sessionId"), false);
+  assert.equal(newChatQuery.get("cwd"), "/workspace");
+});
+
 function saveSession(sid, messages, entryIds = messages.map((_, i) => `e${i}`)) {
   world.sessions.set(sid, { leafId: entryIds.at(-1) ?? null, messages, entryIds });
 }
@@ -3536,6 +3569,27 @@ test("a fresh chat hydrates and follows skill diagnostics after slash discovery 
   await act(() => es.emit({ type: "skill_diagnostics_update", data: updated }));
   assert.deepEqual(w.latest.skillDiagnostics, updated, "live diagnostics follow the created runtime");
   assert.equal(callsTo("POST", "/api/agent/fresh-skills").some((call) => call.body?.type === "prompt"), false, "discovery never starts a model run");
+  w.unmount();
+});
+
+test("an inherited fresh composer backfills the actual native model and thinking before stream attachment", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "native-defaults" } }),
+  });
+  world.agents.set("native-defaults", {
+    running: true,
+    state: { model: { provider: "fixture", id: "native", name: "Native", reasoning: true }, thinkingLevel: "low" },
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  assert.equal(w.latest.thinkingLevel, "inherit");
+  assert.equal(w.latest.allowThinkingInheritance, true);
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  assert.equal(w.latest.thinkingLevel, "low");
+  assert.equal(w.latest.displayModel.modelId, "native");
+  assert.equal(w.latest.allowThinkingInheritance, false);
+  assert.equal(lastEs().readyState, FakeEventSource.CONNECTING);
   w.unmount();
 });
 

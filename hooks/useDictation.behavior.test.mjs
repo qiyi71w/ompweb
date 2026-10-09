@@ -237,6 +237,11 @@ test("starting capture puts the hook in the recording state with a live analyser
   assert.equal(world.recorders[0].timeslice, 100, "timeslice keeps chunks flowing for preview");
   assert.notEqual(view.result.current.captureRef.current.analyser, null, "waveform needs a live analyser");
   assert.ok(view.result.current.captureRef.current.startedAt > 0, "timer needs a start stamp");
+  const capture = view.result.current.captureRef.current;
+  view.rerender();
+  assert.equal(world.recorders.length, 1, "a render must not restart capture");
+  assert.equal(world.tracks[0].stopped, false);
+  assert.equal(view.result.current.captureRef.current, capture);
 });
 
 test("pause then resume keeps the timer base and analyser while accumulating paused time", async () => {
@@ -287,6 +292,11 @@ test("stopping capture enters review with a playable preview, and confirming rel
   assert.equal(view.result.current.isReviewing, true);
   assert.equal(view.result.current.isRecording, false);
   assert.equal(world.createdUrls.length, 1, "review mode needs a preview blob URL");
+  const previewUrl = world.createdUrls[0].url;
+  view.rerender();
+  assert.equal(view.result.current.isReviewing, true);
+  assert.equal(world.createdUrls.length, 1, "a render must keep the existing preview");
+  assert.equal(world.revokedUrls.includes(previewUrl), false);
   assert.ok(world.tracks[0].stopped, "microphone tracks must be released on stop");
 
   await act(async () => {

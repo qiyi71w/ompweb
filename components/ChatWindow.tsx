@@ -1,5 +1,7 @@
 "use client";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { splitModelThinking } from "@/lib/model-selector";
+import { NATIVE_SETTINGS_CHANGED_EVENT } from "@/hooks/useNativeSettings";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
@@ -527,6 +529,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
+    allowThinkingInheritance,
     externalRunActive,
     toolPreset,
     liveModelMeta,
@@ -951,9 +954,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
-  // Resolve the advisor role's display model + reasoning effort for the
-  // composer tooltips. The raw selector is "provider/id[:effort]" from
-  // ~/.omp/agent/config.yml.
+  // Role metadata is the effective selector in this workspace, not runtime proof.
   const [advisorRoleSelector, setAdvisorRoleSelector] = useState<string | null>(null);
   useEffect(() => {
     if (!advisorEnabled) {
@@ -961,12 +962,19 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       return;
     }
     const controller = new AbortController();
-    fetch("/api/model-roles", { signal: controller.signal })
-      .then((response) => response.ok ? response.json() as Promise<{ roles?: Record<string, string> }> : null)
-      .then((data) => setAdvisorRoleSelector(data?.roles?.advisor ?? null))
-      .catch(() => {});
-    return () => controller.abort();
-  }, [advisorEnabled]);
+    const params = new URLSearchParams();
+    if (messageCwd) params.set("cwd", messageCwd);
+    if (session?.id) params.set("sessionId", session.id);
+    const refresh = () => {
+      fetch(`/api/model-roles?${params}`, { signal: controller.signal, cache: "no-store" })
+        .then((response) => response.ok ? response.json() as Promise<{ roles?: Record<string, string> }> : null)
+        .then((data) => { if (!controller.signal.aborted) setAdvisorRoleSelector(data?.roles?.advisor ?? null); })
+        .catch(() => {});
+    };
+    refresh();
+    window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh);
+    return () => { controller.abort(); window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh); };
+  }, [advisorEnabled, messageCwd, session?.id]);
 
   // GitHub repo of the session checkout, so bare `#123` in messages links to it.
   const [githubRepo, setGithubRepo] = useState<string | null>(null);
@@ -983,7 +991,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
 
   const advisorModelMeta = useMemo(() => {
     if (!advisorRoleSelector) return null;
-    const [qualified, effort] = advisorRoleSelector.split(":");
+    const { model: qualified, thinking: effort } = splitModelThinking(advisorRoleSelector, modelList.map((entry) => `${entry.provider}/${entry.id}`));
     const separator = qualified.indexOf("/");
     const provider = separator === -1 ? "" : qualified.slice(0, separator);
     const id = separator === -1 ? qualified : qualified.slice(separator + 1);
@@ -1062,6 +1070,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       isCompacting={isCompacting}
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
+      allowThinkingInheritance={allowThinkingInheritance}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       toolPreset={toolPreset}
       onToolPresetChange={handleToolPresetChange}
@@ -1101,6 +1110,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      sessionId={session?.id}
       /* The pill bar and chevron only render in the non-empty layout; don't
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */

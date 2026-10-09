@@ -2,6 +2,8 @@ export interface ModelsData {
   models: Record<string, string>;
   modelList: { id: string; name: string; provider: string; supportsFastMode?: boolean; supportsSlowMode?: boolean }[];
   defaultModel: { provider: string; modelId: string } | null;
+  defaultThinkingLevel?: string;
+  anthropicSlowMode?: boolean;
   thinkingLevels: Record<string, string[]>;
   connectedProviders?: { id: string; name: string; disabled: boolean }[];
   modelError?: string;

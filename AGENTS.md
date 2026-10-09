@@ -76,11 +76,11 @@ app/api/
   models-config/test/route.ts     POST test a configured model/provider
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
   web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume)
-  mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
+  mcp/route.ts                    GET inventory; POST explicit intents/start-live; PUT validate
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   projects/clone/route.ts         POST clone a git URL into a new workspace (NDJSON progress) | DELETE cancel
-  skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
+  skills/route.ts                 GET discovery/inventory; PATCH baseline-protected hide aliases
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
   stt/route.ts                    POST audio (+scope) → 202 { jobId } | GET ?scope= live jobs (lib/stt-jobs.ts)
@@ -134,7 +134,7 @@ components/
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
   PluginsConfig.tsx   modal for installed plugins
-  SkillsConfig.tsx    modal for loaded/search/installable skills
+  SkillsConfig.tsx    installed/discovered skill inventory, search and installation
   FileExplorer.tsx    file tree inside sidebar
   FileViewer.tsx      file content in a tab
   GhostMirror.tsx     textarea overlay painting ghost-text word completion
@@ -466,26 +466,42 @@ during the wait.
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
 
+### Agents and MCP editor drafts
+- Native-settings invalidation refreshes clean editors only. Dirty drafts, credential
+  replacement text, pending mutations and visible 409 conflicts retain their original
+  baselines until explicit refresh or selection; a successful save reloads its result.
+  Context changes fence old reads and mutation settlements, including their busy state.
+  Settings keeps an existing native view's tab mounted while refreshing; the loading
+  skeleton is reserved for a context with no view yet.
+- The Agents enable checkbox edits `task.disabledAgents` in the selected layer's saved
+  list (absent means empty). Native effective enablement is displayed separately because
+  a workspace or launch override can still win over a global edit.
+
 ### MCP configuration (`lib/omp/mcp-config.ts`, `/api/mcp`, `components/McpConfig.tsx`)
 - Project MCP config resolution order: `.omp/mcp.json`, `.omp/.mcp.json`,
   `mcp.json`, `.mcp.json` at the git top level (falls back to cwd for
   non-git dirs). Server definitions support `stdio`, `http`, and `sse`;
   exactly one of `command`/`url` is required and validated before any write.
-- Writes are atomic (temp file + rename), preserve unrelated top-level keys
-  (`disabledServers`, `$schema`, ...), and support rename via `previousName`.
-- The MCP settings live in their own Settings tab (`SettingsTabs` id `"mcp"`,
-  workspace-gated). Server list rows show a config-derived status dot
-  (valid+enabled / disabled / invalid) — no live-connectivity probe exists in
-  the RPC protocol, so failures surface as toasts (`toast.error`) from the
-  editor actions, not inline text.
-- The endpoint is guarded by the same allowed-root rules as `/api/files`.
+- `mcp-contract.ts` defines explicit create/set/unset/rename/delete intentions;
+  context/path/entity/field HMAC baselines reject same-field conflicts with a safe
+  409 view. `jsonc-parser` edits strict JSON surgically; unknown fields and
+  unrelated formatting survive. Writers share `configuration-file.ts`'s queue
+  and atomic replacement, retaining the existing cooperating-writer MCP lock.
+- Inventory uses the trusted selected context. GET only queries an already-live
+  selected wrapper; POST `start-live` requires the visible user action. Native
+  compact lists report configured inventory, so loaded/connected remain unknown.
+  Saving does not reconnect sessions. Project files remain editable while project
+  loading is disabled; user/external sources are read-only.
+- `env`/`headers` use opaque baselines and explicit preserve/replace/clear controls.
+  The endpoint retains workspace allowlist checks and rejects config symlink escapes.
 
 ### Plugins and skills
-- `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK.
-- `/api/skills` lists through `lib/skills-service.ts`, which execs `omp skill list --json` with the project as the process cwd (omp ≥ 18.3.3; never pass the directory as an argument — Windows `.cmd` launchers run through `cmd.exe`, which would interpret `&` in it). That is the same discovery sessions use, including `namespace/name` collision aliases and plugin/registry/custom-directory skills. A pure-Node replica scan (project `.omp/skills` walk-up, `~/.omp/agent/skills`, the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs, managed skills) is only the fallback for older binaries and failed or malformed output. A failed run is negative-cached per binary fingerprint **and cwd** (5 min) so old installs don't spawn per request while one broken project config cannot degrade the others. Listing runs omp's normal startup, so it has omp's side effects (e.g. omp renames an unparseable `config.yml` aside, as a session would).
-- Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives. omp reports it back as `hide` (it reads `hide`/`disableModelInvocation`/`disable-model-invocation`). Frontmatter is omp's only per-skill "hide from model, keep `/skill:`" knob; `disabledExtensions: ["skill:<name>"]` removes the skill entirely.
-- Only user-owned skills are togglable: `getSkillToggleRoots()` (allowed file roots — workspaces the user opened — plus replica scan roots) is the single allowlist for both PATCH and the `togglable` flag GET returns; it is `main`'s pre-CLI allowlist, unchanged. Skills omp lists from anywhere else (the plugin cache, registry installs, custom directories outside a workspace) render a disabled toggle — their files belong to an installer and an update would discard the edit. Never widen PATCH to whatever omp lists.
-- `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
+- `/api/plugins` shells out to the trusted configuration context's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available), with its profile, cwd and environment. Operations invalidate related inventories without restarting busy sessions. Plugin inventory never proves active runtime loading.
+- `/api/skills` uses the same context for `omp skill list --json`. Native results are authoritative for discovery only; each item separately reports installed, discovered and loaded (`unknown`). Older binaries, failed queries and malformed output use an explicitly nonauthoritative scan, filtered by source switches confirmed false. Unknown switches remain unknown. YAML preflight avoids invoking discovery on malformed known config files; failures are retried on refresh.
+- Skill toggles send the original `contextId` and per-file `baseline` from GET. Under the shared file queue, compare only managed hide aliases and merge into the latest frontmatter; preserve unrelated formatting and return fresh inventory with HTTP409 on conflict, without replay. Complex managed aliases remain read-only. This is same-process serialization, not a cross-process transaction.
+- `getSkillToggleRoots(context)` retains the user-owned roots allowlist. Native visibility never authorizes plugin, registry or external custom-directory file edits; GET editability and PATCH checks share that boundary.
+- Search uses skills.sh; installation uses `npx skills add ... --agent universal` with the trusted cwd/environment. This source is separate from native `skills.registryUrl`. An installed file can remain undiscovered when its source is disabled.
+- Related agent discovery uses the native HOME config plugin root, including `profiles/<profile>/plugins` for a trusted named profile; a custom agent directory does not move the default plugin root.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.

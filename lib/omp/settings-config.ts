@@ -1,282 +1,225 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { dirname } from "path";
-import { isMap, parseDocument, stringify } from "yaml";
-import { getSettingsPath } from "./paths";
+import { execFile } from "child_process";
+import { existsSync, readFileSync } from "fs";
+import { isDeepStrictEqual } from "util";
+import { basename, join } from "path";
+import { isMap, parseDocument, type Document } from "yaml";
 import { isRecord } from "../type-guards";
-import { effectiveCompactionMethodOrder, isCompactionMethodOrder, type CompactionMethod } from "../compaction-methods";
+import { isCompactionMethodOrder } from "../compaction-methods";
+import { assertSettingsTarget, settingsPathIn, type OmpConfigurationContext } from "./configuration-context";
+import { wrapWindowsScript } from "./omp-cli";
+import { APPROVAL_KEY_PREFIX, MODEL_ROLE_PREFIX, NATIVE_MODEL_ROLE_NAMES, getNativeSettingDescriptor, NATIVE_SETTINGS_FIELDS, type NativeSettingsView, type NativeSettingView, type SavedSetting, type SettingValue, type SettingsScope, type SettingsWriteRequest } from "./settings-contract";
+import { configurationBaseline, sameConfigurationBaseline as sameToken, serializedConfigurationWrite as serialized, replaceConfigurationFile } from "./configuration-file";
 
-export type NativeSettings = {
-  defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  providers?: { autoThinkingSource?: "classifier" | "vendor" };
-  hideThinkingBlock?: boolean;
-  externalThinking?: boolean;
-  textVerbosity?: "low" | "medium" | "high";
-  personality?: "default" | "friendly" | "pragmatic" | "none";
-  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
-  tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
-  skills?: { showStartupDiagnostics?: boolean };
-  enabledModels?: string[];
-  disabledProviders?: string[];
-  modelProviderOrder?: string[];
-  registryHasScopedEntries?: boolean;
-  retry?: {
-    enabled?: boolean;
-    maxRetries?: number;
-    modelFallback?: boolean;
-    fallbackRevertPolicy?: "cooldown-expiry" | "never";
-    fallbackChains?: Record<string, string[]>;
-  };
-  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
-  memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
-  autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
-  mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
-  mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
-};
+export { resolveConfigurationContext } from "./configuration-context";
+export type { OmpConfigurationContext } from "./configuration-context";
+export type { NativeSettingsView, SettingsWriteRequest, SettingsOperation, SettingsScope } from "./settings-contract";
 
-const THINKING_LEVELS = new Set(["auto", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const TEXT_VERBOSITIES = new Set(["low", "medium", "high"]);
-const PERSONALITIES = new Set(["default", "friendly", "pragmatic", "none"]);
-const BACKLOGS = new Set(["off", "1", "3", "5"]);
-const APPROVAL_MODES = new Set(["always-ask", "write", "yolo"]);
-const APPROVAL_POLICIES = new Set(["allow", "prompt", "deny"]);
-const FALLBACK_REVERT_POLICIES = new Set(["cooldown-expiry", "never"]);
-const MEMORY_BACKENDS = new Set(["off", "local", "mnemopi", "hindsight"]);
-const MEMORY_SCOPES = new Set(["global", "per-project", "per-project-tagged"]);
 
-function configPath(): string {
-  return getSettingsPath();
-}
-
-function stringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
-}
-
-function assertOptionalRecord(value: unknown, name: string): asserts value is Record<string, unknown> | undefined {
-  if (value !== undefined && !isRecord(value)) throw new Error(`${name} must be an object`);
-}
-
-function assertOptionalBoolean(value: unknown, name: string): void {
-  if (value !== undefined && typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
-}
-
-function readDocument() {
-  const path = configPath();
+function readDocument(path: string): Document {
   const doc = parseDocument(existsSync(path) ? readFileSync(path, "utf8") : "");
-  if (doc.errors.length > 0) throw new Error(`${path} is not valid YAML: ${doc.errors[0].message}`);
-  return { path, doc };
+  if (doc.errors.length || (doc.contents !== null && !isMap(doc.contents))) throw new Error("Configuration is not a valid YAML mapping");
+  return doc;
 }
 
-/** omp's `/slow` for Claude: `providers.anthropic.slowMode: auto` (default off).
- *  An unreadable config counts as off, like omp's default. */
-export function readAnthropicSlowMode(): boolean {
-  try {
-    const data = readDocument().doc.toJS();
-    if (!isRecord(data)) return false;
-    const providers = isRecord(data.providers) ? data.providers : {};
-    const anthropic = isRecord(providers.anthropic) ? providers.anthropic : {};
-    // omp's migration also accepts top-level dotted keys, nested values winning.
-    return (anthropic.slowMode ?? data["providers.anthropic.slowMode"]) === "auto";
-  } catch {
-    return false;
+
+function targetPath(context: OmpConfigurationContext, scope: SettingsScope): string {
+  return settingsPathIn(scope === "global" ? context.view.agentDir : join(context.view.cwd, ".omp"));
+}
+
+function settingPath(key: string): string[] {
+  if (key.startsWith(MODEL_ROLE_PREFIX)) return ["modelRoles", key.slice(MODEL_ROLE_PREFIX.length)];
+  return key.startsWith(APPROVAL_KEY_PREFIX) ? ["tools", "approval", key.slice(APPROVAL_KEY_PREFIX.length)] : key.split(".");
+}
+
+function ownPath(data: unknown, key: string): { exists: boolean; value?: unknown } {
+  let current = data;
+  for (const part of settingPath(key)) {
+    if (!isRecord(current) || !Object.hasOwn(current, part)) return { exists: false };
+    current = current[part];
+  }
+  return { exists: true, value: current };
+}
+
+function locations(data: unknown, key: string) {
+  const nested = ownPath(data, key);
+  // Native dictionary members are literal. Top-level dotted configuration is
+  // preserved, not silently migrated into a working native permission grant.
+  const approval = key.startsWith(APPROVAL_KEY_PREFIX) || key.startsWith(MODEL_ROLE_PREFIX);
+  const dotted = !approval && isRecord(data) && Object.hasOwn(data, key) && key.includes(".") ? { exists: true, value: data[key] } : { exists: false };
+  const tools = ownPath(data, "tools");
+  const dictionary = ownPath(data, "tools.approval");
+  const obstruction = key.startsWith(MODEL_ROLE_PREFIX) ? [ownPath(data, "modelRoles")].filter((part) => part.exists && !isRecord(part.value)) : approval ? [tools, dictionary].filter((part) => part.exists && !isRecord(part.value)) : [];
+  const legacy = key === "compaction.methodOrder" ? ["compaction.strategy", "compaction.remoteEnabled"].map((alias) => ({ nested: ownPath(data, alias), dotted: isRecord(data) && Object.hasOwn(data, alias) ? { exists: true, value: data[alias] } : { exists: false } })) : [];
+  return { nested, dotted, legacy, obstruction };
+}
+
+function token(context: OmpConfigurationContext, scope: SettingsScope, key: string, data: unknown): string {
+  return configurationBaseline([context.view.id, scope, targetPath(context, scope), key, locations(data, key)]);
+}
+
+function fitsShape(key: string, value: unknown, allowUnknownEnum = false): boolean {
+  const descriptor = getNativeSettingDescriptor(key);
+  if (!descriptor) return false;
+  switch (descriptor.type) {
+    case "string": return typeof value === "string" && !!value.trim();
+    case "boolean": return typeof value === "boolean";
+    case "number": return typeof value === "number" && Number.isFinite(value);
+    case "enum": return typeof value === "string" && (allowUnknownEnum || descriptor.values?.includes(value) === true);
+    case "array": return Array.isArray(value) && value.every((item) => typeof item === "string") && (key !== "compaction.methodOrder" || isCompactionMethodOrder(value));
+    case "record": return isRecord(value) && Object.entries(value).every(([role, chain]) => role.trim() && (key === "task.agentModelOverrides" ? typeof chain === "string" && !!chain.trim() : Array.isArray(chain) && chain.every((item) => typeof item === "string" && item.trim())));
   }
 }
 
-/** Returns the persisted native OMP values only; omitted keys keep OMP defaults. */
-export function readNativeSettings(): { path: string; settings: NativeSettings } {
-  const { path, doc } = readDocument();
-  const data = doc.toJS();
-  if (!isRecord(data)) return { path, settings: {} };
-  const advisor = isRecord(data.advisor) ? data.advisor : {};
-  const providers = isRecord(data.providers) ? data.providers : {};
-  const autoThinkingSource = providers.autoThinkingSource;
-  const tools = isRecord(data.tools) ? data.tools : {};
-  const approval = isRecord(tools.approval) ? tools.approval : {};
-  const skills = isRecord(data.skills) ? data.skills : {};
-  const retry = isRecord(data.retry) ? data.retry : {};
-  const fallbackChains = isRecord(retry.fallbackChains)
-    ? Object.fromEntries(Object.entries(retry.fallbackChains).filter((entry): entry is [string, string[]] => typeof entry[0] === "string" && stringArray(entry[1]) !== undefined))
-    : {};
-  const compaction = isRecord(data.compaction) ? data.compaction : {};
-  // omp's migration also accepts top-level dotted keys, nested values winning.
-  const methodOrder = effectiveCompactionMethodOrder({
-    methodOrder: data["compaction.methodOrder"],
-    strategy: data["compaction.strategy"],
-    remoteEnabled: data["compaction.remoteEnabled"],
-    ...Object.fromEntries(Object.entries(compaction).filter(([, value]) => value != null)),
+function savedSetting(context: OmpConfigurationContext, scope: SettingsScope, key: string, data: unknown): SavedSetting {
+  const { nested, dotted, legacy } = locations(data, key);
+  const saved = nested.exists ? nested : dotted;
+  const legacyOverride = legacy.some((alias) => alias.nested.exists || alias.dotted.exists);
+  return { exists: saved.exists, ...(saved.exists ? fitsShape(key, saved.value, true) ? { value: saved.value } : { redacted: true } : {}), ...(legacyOverride ? { legacyOverride: true } : {}), token: token(context, scope, key, data) };
+}
+
+interface NativeEntry { type: string; value?: unknown; redacted?: boolean }
+async function nativeEntries(context: OmpConfigurationContext): Promise<Record<string, NativeEntry>> {
+  const binary = context.view.binary;
+  if (!binary) throw new Error("OMP binary is unavailable");
+  const target = wrapWindowsScript(binary, [...context.queryArgs, "config", "list", "--json"]);
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(target.file, target.args, { cwd: context.view.cwd, env: context.env, timeout: 12_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => error ? reject(new Error("Native configuration query failed")) : resolve(stdout));
   });
-  const memory = isRecord(data.memory) ? data.memory : {};
-  const autolearn = isRecord(data.autolearn) ? data.autolearn : {};
-  const mnemopi = isRecord(data.mnemopi) ? data.mnemopi : {};
-  const mcp = isRecord(data.mcp) ? data.mcp : {};
-  const registryHasScopedEntries = [data.enabledModels, data.disabledProviders, data.modelProviderOrder]
-    .some((value) => Array.isArray(value) && !value.every((item) => typeof item === "string"));
-  return {
-    path,
-    settings: {
-      ...(THINKING_LEVELS.has(data.defaultThinkingLevel as string) ? { defaultThinkingLevel: data.defaultThinkingLevel as NativeSettings["defaultThinkingLevel"] } : {}),
-      ...(autoThinkingSource === "classifier" || autoThinkingSource === "vendor"
-        ? { providers: { autoThinkingSource } }
-        : {}),
-      ...(typeof data.hideThinkingBlock === "boolean" ? { hideThinkingBlock: data.hideThinkingBlock } : {}),
-      ...(typeof data.externalThinking === "boolean" ? { externalThinking: data.externalThinking } : {}),
-      ...(TEXT_VERBOSITIES.has(data.textVerbosity as string) ? { textVerbosity: data.textVerbosity as NativeSettings["textVerbosity"] } : {}),
-      ...(PERSONALITIES.has(data.personality as string) ? { personality: data.personality as NativeSettings["personality"] } : {}),
-      ...(Object.keys(advisor).length ? {
-        advisor: {
-          ...(typeof advisor.enabled === "boolean" ? { enabled: advisor.enabled } : {}),
-          ...(typeof advisor.subagents === "boolean" ? { subagents: advisor.subagents } : {}),
-          ...(BACKLOGS.has(advisor.syncBacklog as string) ? { syncBacklog: advisor.syncBacklog as "off" | "1" | "3" | "5" } : {}),
-          ...(typeof advisor.immuneTurns === "number" && Number.isInteger(advisor.immuneTurns) ? { immuneTurns: advisor.immuneTurns } : {}),
-        },
-      } : {}),
-      ...(Object.keys(tools).length ? { tools: {
-        ...(APPROVAL_MODES.has(tools.approvalMode as string) ? { approvalMode: tools.approvalMode as "always-ask" | "write" | "yolo" } : {}),
-        ...(APPROVAL_POLICIES.has(approval.bash as string) || approval.extension === "allow" || approval.extension === "prompt" ? { approval: {
-          ...(APPROVAL_POLICIES.has(approval.bash as string) ? { bash: approval.bash as "allow" | "prompt" | "deny" } : {}),
-          ...(approval.extension === "allow" || approval.extension === "prompt" ? { extension: approval.extension } : {}),
-        } } : {}),
-      } } : {}),
-      ...(typeof skills.showStartupDiagnostics === "boolean" ? {
-        skills: { showStartupDiagnostics: skills.showStartupDiagnostics },
-      } : {}),
-      ...(stringArray(data.enabledModels) ? { enabledModels: stringArray(data.enabledModels) } : {}),
-      ...(stringArray(data.disabledProviders) ? { disabledProviders: stringArray(data.disabledProviders) } : {}),
-      ...(stringArray(data.modelProviderOrder) ? { modelProviderOrder: stringArray(data.modelProviderOrder) } : {}),
-      ...(registryHasScopedEntries ? { registryHasScopedEntries: true } : {}),
-      ...(Object.keys(retry).length ? { retry: {
-        ...(typeof retry.enabled === "boolean" ? { enabled: retry.enabled } : {}),
-        ...(typeof retry.maxRetries === "number" && Number.isInteger(retry.maxRetries) ? { maxRetries: retry.maxRetries } : {}),
-        ...(typeof retry.modelFallback === "boolean" ? { modelFallback: retry.modelFallback } : {}),
-        ...(FALLBACK_REVERT_POLICIES.has(retry.fallbackRevertPolicy as string) ? { fallbackRevertPolicy: retry.fallbackRevertPolicy as "cooldown-expiry" | "never" } : {}),
-        ...(Object.keys(fallbackChains).length ? { fallbackChains } : {}),
-      } } : {}),
-      ...(Object.keys(compaction).length || methodOrder ? { compaction: {
-        ...(typeof compaction.enabled === "boolean" ? { enabled: compaction.enabled } : {}),
-        ...(typeof compaction.midTurnEnabled === "boolean" ? { midTurnEnabled: compaction.midTurnEnabled } : {}),
-        ...(methodOrder ? { methodOrder } : {}),
-        ...(typeof compaction.autoContinue === "boolean" ? { autoContinue: compaction.autoContinue } : {}),
-        ...(typeof compaction.keepRecentTokens === "number" && Number.isInteger(compaction.keepRecentTokens) ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
-      } } : {}),
-      ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as "off" | "local" | "mnemopi" | "hindsight" } : {}) } } : {}),
-      ...(Object.keys(autolearn).length ? { autolearn: {
-        ...(typeof autolearn.enabled === "boolean" ? { enabled: autolearn.enabled } : {}),
-        ...(typeof autolearn.autoContinue === "boolean" ? { autoContinue: autolearn.autoContinue } : {}),
-        ...(typeof autolearn.minToolCalls === "number" && Number.isInteger(autolearn.minToolCalls) ? { minToolCalls: autolearn.minToolCalls } : {}),
-      } } : {}),
-      ...(Object.keys(mnemopi).length ? { mnemopi: {
-        ...(MEMORY_SCOPES.has(mnemopi.scoping as string) ? { scoping: mnemopi.scoping as "global" | "per-project" | "per-project-tagged" } : {}),
-        ...(typeof mnemopi.autoRecall === "boolean" ? { autoRecall: mnemopi.autoRecall } : {}),
-        ...(typeof mnemopi.autoRetain === "boolean" ? { autoRetain: mnemopi.autoRetain } : {}),
-        ...(typeof mnemopi.noEmbeddings === "boolean" ? { noEmbeddings: mnemopi.noEmbeddings } : {}),
-      } } : {}),
-      ...(Object.keys(mcp).length ? { mcp: {
-        ...(typeof mcp.enableProjectConfig === "boolean" ? { enableProjectConfig: mcp.enableProjectConfig } : {}),
-        ...(typeof mcp.renderMarkdownResults === "boolean" ? { renderMarkdownResults: mcp.renderMarkdownResults } : {}),
-        ...(typeof mcp.notifications === "boolean" ? { notifications: mcp.notifications } : {}),
-        ...(typeof mcp.notificationDebounceMs === "number" && Number.isInteger(mcp.notificationDebounceMs) ? { notificationDebounceMs: mcp.notificationDebounceMs } : {}),
-      } } : {}),
-    },
-  };
+  const entries: unknown = JSON.parse(stdout);
+  if (!isRecord(entries) || !Object.keys(entries).length || Object.values(entries).some((entry) => !isRecord(entry) || typeof entry.type !== "string")) throw new Error("Native configuration query is malformed");
+  return entries as Record<string, NativeEntry>;
 }
 
-/** Validates and applies a reviewed subset of OMP's global config schema. */
-export function writeNativeSettings(settings: NativeSettings): void {
-  if (!isRecord(settings)) throw new Error("Settings must be an object");
-  assertOptionalRecord(settings.providers, "providers");
-  const autoThinkingSource = settings.providers?.autoThinkingSource;
-  if (autoThinkingSource !== undefined && autoThinkingSource !== "classifier" && autoThinkingSource !== "vendor") {
-    throw new Error("Invalid Auto thinking source");
-  }
-  assertOptionalRecord(settings.advisor, "advisor");
-  assertOptionalRecord(settings.tools, "tools");
-  assertOptionalRecord(settings.tools?.approval, "tools.approval");
-  assertOptionalRecord(settings.skills, "skills");
-  assertOptionalRecord(settings.retry, "retry");
-  assertOptionalRecord(settings.compaction, "compaction");
-  assertOptionalRecord(settings.memory, "memory");
-  assertOptionalRecord(settings.autolearn, "autolearn");
-  assertOptionalRecord(settings.mnemopi, "mnemopi");
-  assertOptionalRecord(settings.mcp, "mcp");
-  if (settings.skills && Object.keys(settings.skills).some((key) => key !== "showStartupDiagnostics")) {
-    throw new Error("Unsupported skills setting");
-  }
-  for (const [name, value] of Object.entries({
-    hideThinkingBlock: settings.hideThinkingBlock,
-    externalThinking: settings.externalThinking,
-    "advisor.enabled": settings.advisor?.enabled,
-    "advisor.subagents": settings.advisor?.subagents,
-    "retry.enabled": settings.retry?.enabled,
-    "skills.showStartupDiagnostics": settings.skills?.showStartupDiagnostics,
-    "retry.modelFallback": settings.retry?.modelFallback,
-    "compaction.enabled": settings.compaction?.enabled,
-    "compaction.midTurnEnabled": settings.compaction?.midTurnEnabled,
-    "compaction.autoContinue": settings.compaction?.autoContinue,
-    "autolearn.enabled": settings.autolearn?.enabled,
-    "autolearn.autoContinue": settings.autolearn?.autoContinue,
-    "mnemopi.autoRecall": settings.mnemopi?.autoRecall,
-    "mnemopi.autoRetain": settings.mnemopi?.autoRetain,
-    "mnemopi.noEmbeddings": settings.mnemopi?.noEmbeddings,
-    "mcp.enableProjectConfig": settings.mcp?.enableProjectConfig,
-    "mcp.renderMarkdownResults": settings.mcp?.renderMarkdownResults,
-    "mcp.notifications": settings.mcp?.notifications,
-  })) assertOptionalBoolean(value, name);
-  if (settings.defaultThinkingLevel !== undefined && !THINKING_LEVELS.has(settings.defaultThinkingLevel)) throw new Error("Invalid default thinking level");
-  if (settings.textVerbosity !== undefined && !TEXT_VERBOSITIES.has(settings.textVerbosity)) throw new Error("Invalid text verbosity");
-  if (settings.personality !== undefined && !PERSONALITIES.has(settings.personality)) throw new Error("Invalid personality");
-  if (settings.advisor?.syncBacklog !== undefined && !BACKLOGS.has(settings.advisor.syncBacklog)) throw new Error("Invalid advisor sync backlog");
-  if (settings.advisor?.immuneTurns !== undefined && (!Number.isInteger(settings.advisor.immuneTurns) || settings.advisor.immuneTurns < 0 || settings.advisor.immuneTurns > 20)) throw new Error("Advisor immune turns must be an integer between 0 and 20");
-  if (settings.tools?.approvalMode !== undefined && !APPROVAL_MODES.has(settings.tools.approvalMode)) throw new Error("Invalid approval mode");
-  if (settings.tools?.approval?.bash !== undefined && !APPROVAL_POLICIES.has(settings.tools.approval.bash)) throw new Error("Invalid Bash approval policy");
-  if (settings.tools?.approval?.extension !== undefined && settings.tools.approval.extension !== "allow" && settings.tools.approval.extension !== "prompt") throw new Error("Invalid extension tool approval policy");
-  if (settings.retry?.maxRetries !== undefined && (!Number.isInteger(settings.retry.maxRetries) || settings.retry.maxRetries < 0 || settings.retry.maxRetries > 20)) throw new Error("Retry attempts must be an integer between 0 and 20");
-  if (settings.retry?.fallbackRevertPolicy !== undefined && !FALLBACK_REVERT_POLICIES.has(settings.retry.fallbackRevertPolicy)) throw new Error("Invalid fallback revert policy");
-  if (settings.retry?.fallbackChains !== undefined) {
-    for (const [role, chain] of Object.entries(settings.retry.fallbackChains)) {
-      if (!role.trim() || !Array.isArray(chain) || chain.some((selector) => typeof selector !== "string" || !selector.trim())) throw new Error("Fallback chains require non-empty role and model selectors");
-    }
-  }
-  if (settings.compaction?.methodOrder !== undefined && !isCompactionMethodOrder(settings.compaction.methodOrder)) throw new Error("Invalid compaction method order");
-  if (settings.compaction?.keepRecentTokens !== undefined && (!Number.isInteger(settings.compaction.keepRecentTokens) || settings.compaction.keepRecentTokens < 1_000 || settings.compaction.keepRecentTokens > 1_000_000)) throw new Error("Compaction retained tokens must be an integer between 1,000 and 1,000,000");
-  if (settings.memory?.backend !== undefined && !MEMORY_BACKENDS.has(settings.memory.backend)) throw new Error("Invalid memory backend");
-  if (settings.autolearn?.minToolCalls !== undefined && (!Number.isInteger(settings.autolearn.minToolCalls) || settings.autolearn.minToolCalls < 0 || settings.autolearn.minToolCalls > 100)) throw new Error("Auto-learn minimum tool calls must be an integer between 0 and 100");
-  if (settings.mnemopi?.scoping !== undefined && !MEMORY_SCOPES.has(settings.mnemopi.scoping)) throw new Error("Invalid Mnemopi memory scope");
-  if (settings.mcp?.notificationDebounceMs !== undefined && (!Number.isInteger(settings.mcp.notificationDebounceMs) || settings.mcp.notificationDebounceMs < 0 || settings.mcp.notificationDebounceMs > 60_000)) throw new Error("MCP notification debounce must be an integer between 0 and 60,000");
-  for (const [key, values] of Object.entries({ enabledModels: settings.enabledModels, disabledProviders: settings.disabledProviders, modelProviderOrder: settings.modelProviderOrder })) {
-    if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== "string" || !value.trim()))) throw new Error(`${key} must contain non-empty strings`);
-  }
+/** Internal discovery input only; never forward the full native registry. */
+export async function readNativeAgentSettings(context: OmpConfigurationContext): Promise<Record<string, unknown>> {
+  for (const scope of ["global", "project"] as const) assertSettingsTarget(context, scope, targetPath(context, scope));
+  for (const file of [targetPath(context, "global"), targetPath(context, "project"), ...context.view.launch.configFiles]) readDocument(file).toJS({ maxAliasCount: 100 });
+  const entries = await nativeEntries(context);
+  return Object.fromEntries(["extensions", "enabledProviders", "disabledProviders", "task.disabledAgents"].map((key) => [key, entries[key]?.redacted ? undefined : entries[key]?.value]));
+}
 
-  const { path, doc } = readDocument();
-  mkdirSync(dirname(path), { recursive: true });
-  if (doc.contents === null) {
-    const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, stringify(settings), "utf8");
-    renameSync(temp, path);
-    return;
+/** Server-only discovery capabilities; absent/unregistered values stay unknown. */
+export async function readNativeSkillSettings(context: OmpConfigurationContext): Promise<Record<string, unknown>> {
+  for (const scope of ["global", "project"] as const) assertSettingsTarget(context, scope, targetPath(context, scope));
+  for (const file of [targetPath(context, "global"), targetPath(context, "project"), ...context.view.launch.configFiles]) readDocument(file).toJS({ maxAliasCount: 100 });
+  const entries = await nativeEntries(context);
+  return Object.fromEntries([
+    "skills.enabled", "skills.enableCodexUser", "skills.enableClaudeUser", "skills.enableClaudeProject",
+    "skills.enablePiUser", "skills.enablePiProject", "skills.enableAgentsUser", "skills.enableAgentsProject",
+    "skills.customDirectories", "skills.ignoredSkills", "skills.includeSkills",
+  ].map((key) => [key, entries[key]?.redacted ? undefined : entries[key]?.value]));
+}
+
+/** A fresh native process is intentional: no utility/session cache or fabricated defaults. */
+export async function readNativeSettings(context: OmpConfigurationContext, scope: SettingsScope = "global", approvalKeys: string[] = [], roleKeys: string[] = []): Promise<NativeSettingsView> {
+  for (const name of approvalKeys) if (!getNativeSettingDescriptor(`${APPROVAL_KEY_PREFIX}${name}`)) throw new Error("Invalid approval policy key");
+  for (const name of roleKeys) if (!getNativeSettingDescriptor(`${MODEL_ROLE_PREFIX}${name}`)) throw new Error("Invalid model role");
+  const path = targetPath(context, scope);
+  let data: unknown = {};
+  let capability: NativeSettingsView["capability"] = { available: false, reason: context.view.binary ? "query-failed" : "binary-unavailable" };
+  let entries: Record<string, NativeEntry> = {};
+  let globalData: unknown = {};
+  try {
+    assertSettingsTarget(context, scope, path);
+    const doc = readDocument(path);
+    data = doc.toJS({ maxAliasCount: 100 }) ?? {};
+    // Preflight both layers/overlays: native startup may quarantine invalid YAML.
+    // A Web read must not trigger that destructive native recovery path.
+    for (const file of [targetPath(context, "global"), targetPath(context, "project"), ...context.view.launch.configFiles]) {
+      const layer = readDocument(file).toJS({ maxAliasCount: 100 });
+      if (file === targetPath(context, "global")) globalData = layer;
+    }
+  } catch {
+    capability = { available: false, reason: "invalid-yaml" };
   }
-  if (!isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
-  if (settings.defaultThinkingLevel !== undefined) doc.set("defaultThinkingLevel", settings.defaultThinkingLevel);
-  if (autoThinkingSource !== undefined) doc.setIn(["providers", "autoThinkingSource"], autoThinkingSource);
-  if (settings.hideThinkingBlock !== undefined) doc.set("hideThinkingBlock", settings.hideThinkingBlock);
-  if (settings.externalThinking !== undefined) doc.set("externalThinking", settings.externalThinking);
-  if (settings.textVerbosity !== undefined) doc.set("textVerbosity", settings.textVerbosity);
-  if (settings.personality !== undefined) doc.set("personality", settings.personality);
-  for (const [key, value] of Object.entries(settings.advisor ?? {})) doc.setIn(["advisor", key], value);
-  if (settings.tools?.approvalMode !== undefined) doc.setIn(["tools", "approvalMode"], settings.tools.approvalMode);
-  if (settings.tools?.approval?.bash !== undefined) doc.setIn(["tools", "approval", "bash"], settings.tools.approval.bash);
-  if (settings.tools?.approval?.extension !== undefined) doc.setIn(["tools", "approval", "extension"], settings.tools.approval.extension);
-  if (settings.skills?.showStartupDiagnostics !== undefined) {
-    doc.setIn(["skills", "showStartupDiagnostics"], settings.skills.showStartupDiagnostics);
+  if (capability.reason !== "invalid-yaml" && context.view.binary) {
+    try { entries = await nativeEntries(context); capability = { available: true }; } catch { /* safe, explicit read-only capability */ }
   }
-  if (settings.enabledModels !== undefined) doc.set("enabledModels", settings.enabledModels);
-  if (settings.disabledProviders !== undefined) doc.set("disabledProviders", settings.disabledProviders);
-  if (settings.modelProviderOrder !== undefined) doc.set("modelProviderOrder", settings.modelProviderOrder);
-  for (const [key, value] of Object.entries(settings.retry ?? {})) doc.setIn(["retry", key], value);
-  for (const [key, value] of Object.entries(settings.compaction ?? {})) doc.setIn(["compaction", key], value);
-  for (const [key, value] of Object.entries(settings.memory ?? {})) doc.setIn(["memory", key], value);
-  for (const [key, value] of Object.entries(settings.autolearn ?? {})) doc.setIn(["autolearn", key], value);
-  for (const [key, value] of Object.entries(settings.mnemopi ?? {})) doc.setIn(["mnemopi", key], value);
-  for (const [key, value] of Object.entries(settings.mcp ?? {})) doc.setIn(["mcp", key], value);
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temp, doc.toString(), "utf8");
-  renameSync(temp, path);
+  const unsupportedTarget = scope === "project" && basename(path) === "config.yaml" && /(?:^|\/)18\.8\.4$/.test(context.view.version ?? "");
+  const fields: Record<string, NativeSettingView> = {};
+  const keys = new Set(Object.keys(NATIVE_SETTINGS_FIELDS));
+  const savedPolicies = ownPath(data, "tools.approval").value;
+  const nativePolicies = entries["tools.approval"]?.value;
+  for (const policies of [savedPolicies, nativePolicies]) if (isRecord(policies)) {
+    for (const name of Object.keys(policies)) if (getNativeSettingDescriptor(`${APPROVAL_KEY_PREFIX}${name}`)) keys.add(`${APPROVAL_KEY_PREFIX}${name}`);
+  }
+  for (const name of approvalKeys) keys.add(`${APPROVAL_KEY_PREFIX}${name}`);
+  for (const name of [...NATIVE_MODEL_ROLE_NAMES, ...roleKeys]) keys.add(`${MODEL_ROLE_PREFIX}${name}`);
+  for (const roles of [ownPath(data, "modelRoles").value, entries.modelRoles?.value]) if (isRecord(roles)) {
+    for (const name of Object.keys(roles)) if (getNativeSettingDescriptor(`${MODEL_ROLE_PREFIX}${name}`)) keys.add(`${MODEL_ROLE_PREFIX}${name}`);
+  }
+  for (const key of keys) {
+    const descriptor = getNativeSettingDescriptor(key)!;
+    const saved = savedSetting(context, scope, key, data);
+    const registration = entries[descriptor.parent ?? key];
+    const supported = !!registration && registration.type === (descriptor.parent ? "record" : descriptor.type);
+    const policyKey = descriptor.parent === "tools.approval" ? key.slice(APPROVAL_KEY_PREFIX.length) : undefined;
+    const member = descriptor.parent ? key.slice(descriptor.parent.length + 1) : undefined;
+    const rawValue = member !== undefined ? { exists: isRecord(registration?.value) && Object.hasOwn(registration.value, member), value: isRecord(registration?.value) ? registration.value[member] : undefined } : { exists: !!registration && Object.hasOwn(registration, "value"), value: registration?.value };
+    const native: SettingValue = { known: supported && rawValue.exists && !registration?.redacted, ...(supported && rawValue.exists ? fitsShape(key, rawValue.value, true) ? { value: rawValue.value } : { redacted: true } : {}) };
+    if (native.redacted) native.known = false;
+    const unknownEnum = descriptor.type === "enum" && ((saved.exists && typeof saved.value === "string" && !descriptor.values?.includes(saved.value)) || (typeof native.value === "string" && !descriptor.values?.includes(native.value)));
+    const inheritedFilter = scope === "project" && !saved.exists && ["enabledModels", "enabledProviders", "disabledProviders"].includes(key) ? savedSetting(context, "global", key, globalData) : undefined;
+    const complex = saved.redacted || inheritedFilter?.redacted || native.redacted || locations(data, key).obstruction.length > 0 || (member !== undefined && supported && (registration.redacted || !isRecord(registration.value)));
+    const reason = !capability.available ? "query-failed" : unsupportedTarget ? "project-yaml-unsupported" : !registration ? "unregistered" : !supported ? "type-mismatch" : descriptor.readOnly ? "constraint-only" : complex ? "complex-value" : unknownEnum ? "unknown-enum" : undefined;
+    fields[key] = { key, ...(policyKey !== undefined ? { policyKey } : {}), supported, editable: reason === undefined, canUnset: supported && !descriptor.readOnly && !unsupportedTarget && capability.available && (saved.exists || saved.legacyOverride === true) && !complex, ...(reason ? { reason } : {}), saved, native, effective: context.unknownEffectiveKeys.has("*") || context.unknownEffectiveKeys.has(key) || (descriptor.parent !== undefined && context.unknownEffectiveKeys.has(descriptor.parent)) ? { known: false } : native, application: descriptor.application ?? "new-session", type: descriptor.type };
+  }
+  return { context: context.view, scope, path, capability, fields };
+}
+
+export class SettingsConflictError extends Error {
+  constructor(public readonly latest: NativeSettingsView, public readonly keys: string[]) { super("Native settings changed; refresh and review before saving"); }
+}
+
+export function validateSettingsWriteRequest(request: SettingsWriteRequest): void {
+  if (!isRecord(request) || Object.keys(request).some((key) => !["contextId", "scope", "operations"].includes(key)) || typeof request.contextId !== "string" || !["global", "project"].includes(request.scope) || !Array.isArray(request.operations)) throw new Error("Expected contextId, scope and explicit settings operations");
+  const seen = new Set<string>();
+  for (const operation of request.operations) {
+    if (!isRecord(operation) || Object.keys(operation).some((key) => !["key", "op", "value", "baseline"].includes(key)) || typeof operation.key !== "string" || !getNativeSettingDescriptor(operation.key) || seen.has(operation.key)) throw new Error("Unsupported or duplicate settings field");
+    seen.add(operation.key);
+    if (!["set", "unset"].includes(operation.op) || !isRecord(operation.baseline) || typeof operation.baseline.exists !== "boolean" || typeof operation.baseline.token !== "string") throw new Error("Settings operation requires an existence/value baseline");
+    if (operation.op === "set" && !fitsShape(operation.key, operation.value)) throw new Error(`Invalid value for ${operation.key}`);
+    if (operation.op === "unset" && Object.hasOwn(operation, "value")) throw new Error("unset must not contain a value");
+  }
+}
+
+
+/** Serializes Web writes only; an external writer can still race read/replace. */
+export async function writeNativeSettings(context: OmpConfigurationContext, request: SettingsWriteRequest): Promise<NativeSettingsView> {
+  validateSettingsWriteRequest(request);
+  const scope = request.scope;
+  const approvalKeys = request.operations.filter(({ key }) => key.startsWith(APPROVAL_KEY_PREFIX)).map(({ key }) => key.slice(APPROVAL_KEY_PREFIX.length));
+  const roleKeys = request.operations.filter(({ key }) => key.startsWith(MODEL_ROLE_PREFIX)).map(({ key }) => key.slice(MODEL_ROLE_PREFIX.length));
+  const lockKey = targetPath(context, scope);
+  return serialized(lockKey, async () => {
+    const view = await readNativeSettings(context, scope, approvalKeys, roleKeys);
+    if (request.contextId !== context.view.id) throw new SettingsConflictError(view, request.operations.map(({ key }) => key));
+    if (!view.capability.available) throw new Error("Native configuration is read-only");
+    const conflicts = request.operations.filter(({ key, baseline }) => {
+      const saved = view.fields[key].saved;
+      return baseline.exists !== saved.exists || !sameToken(baseline.token, saved.token) || (!saved.redacted && !isDeepStrictEqual(baseline.value, saved.value));
+    }).map(({ key }) => key);
+    if (conflicts.length) throw new SettingsConflictError(view, conflicts);
+    for (const operation of request.operations) {
+      const field = view.fields[operation.key];
+      if (operation.op === "set" ? !field.editable : !field.canUnset) throw new Error(`Setting is read-only: ${operation.key}`);
+    }
+    if (!request.operations.length) return { ...view, persistence: { saved: false, appliedToRunningSessions: false } };
+    const path = targetPath(context, scope);
+    assertSettingsTarget(context, scope, path);
+    const doc = readDocument(path);
+    // Recheck after the native query, which can itself perform legacy migrations.
+    const data = doc.toJS({ maxAliasCount: 100 }) ?? {};
+    const changed = request.operations.filter(({ key, baseline }) => !sameToken(baseline.token, token(context, scope, key, data))).map(({ key }) => key);
+    if (changed.length) throw new SettingsConflictError(await readNativeSettings(context, scope, approvalKeys, roleKeys), changed);
+    for (const { key, op, value } of request.operations) {
+      if (!key.startsWith(APPROVAL_KEY_PREFIX) && !key.startsWith(MODEL_ROLE_PREFIX) && key.includes(".") && isMap(doc.contents)) doc.delete(key);
+      if (op === "unset") {
+        doc.deleteIn(settingPath(key));
+        if (key === "compaction.methodOrder") for (const alias of ["compaction.strategy", "compaction.remoteEnabled"]) { doc.delete(alias); doc.deleteIn(alias.split(".")); }
+      } else doc.setIn(settingPath(key), value);
+    }
+    replaceConfigurationFile(path, doc.toString());
+    return { ...await readNativeSettings(context, scope, approvalKeys, roleKeys), persistence: { saved: true, appliedToRunningSessions: false } };
+  });
 }

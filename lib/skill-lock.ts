@@ -24,6 +24,7 @@ interface GlobalLockPathOptions {
 interface AnnotateSkillOptions {
   cwd: string;
   agentDir: string;
+  homeDir?: string;
   globalLockPath?: string;
   projectLockPath?: string;
 }
@@ -124,6 +125,7 @@ export function annotateSkillsWithInstallInfo(
   {
     cwd,
     agentDir,
+    homeDir = homedir(),
     globalLockPath = getGlobalSkillsLockPath(),
     projectLockPath = join(cwd, "skills-lock.json"),
   }: AnnotateSkillOptions,
@@ -132,7 +134,7 @@ export function annotateSkillsWithInstallInfo(
   const projectEntries = readSkillLock(projectLockPath);
   // skills.sh installs with --agent universal land in .agents/skills; omp's
   // own dirs remain valid install roots for manually placed skills.
-  const globalSkillsRoots = [join(agentDir, "skills"), join(homedir(), ".agents", "skills")];
+  const globalSkillsRoots = [join(agentDir, "skills"), join(homeDir, ".agents", "skills")];
   const projectSkillsRoots = [join(cwd, ".omp", "skills"), join(cwd, ".agents", "skills")];
 
   return skills.map((skill) => {

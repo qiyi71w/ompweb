@@ -1,3 +1,4 @@
+import { resolveConfigurationContext } from "@/lib/omp/configuration-context";
 import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
@@ -17,14 +18,18 @@ const API_KEY_WRITE_GUIDANCE =
   "custom provider in ~/.omp/agent/models.yml.";
 
 // GET /api/auth/api-key/[provider] — returns auth status (never returns the actual key)
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(req: Request, { params }: Params) {
   const { provider } = await params;
   try {
+    const url = new URL(req.url);
+    const context = await resolveConfigurationContext({ cwd: url.searchParams.get("cwd"), sessionId: url.searchParams.get("sessionId") });
     const { models } = await runUtilityCommand<{ models: OmpModel[] }>(
+      context,
       { type: "get_available_models" },
       120_000,
     );
     const { providers: loginProviders } = await runUtilityCommand<{ providers: OmpLoginProvider[] }>(
+      context,
       { type: "get_login_providers" },
       30_000,
     );

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { randomUUID } from "crypto";
 import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
@@ -42,6 +42,10 @@ export async function POST(req: Request) {
     if (!existsSync(cwd)) {
       return NextResponse.json({ error: `Directory does not exist: ${cwd}`, code: "directory_not_found" }, { status: 400 });
     }
+    if (!statSync(cwd).isDirectory()) {
+      return NextResponse.json({ error: "Workspace is not a directory", code: "not_a_directory" }, { status: 400 });
+    }
+    allowFileRoot(cwd);
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
     const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; [key: string]: unknown };
@@ -58,10 +62,6 @@ export async function POST(req: Request) {
     const tempKey = `__new__${randomUUID()}`;
     const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, advisor === true);
 
-    // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
-    // in sync so the new cwd is immediately readable via /api/files. Without this,
-    // a file request under a brand-new cwd would 403 for up to the cache TTL.
-    allowFileRoot(cwd);
     invalidateSessionListCache();
 
     try {

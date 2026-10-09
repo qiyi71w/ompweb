@@ -1,13 +1,10 @@
-import { homedir } from "os";
+import type { OmpConfigurationContext } from "./configuration-context";
 import { RpcProcess } from "./rpc-process";
 
 /**
- * Shared short-lived `omp` utility process for global registry/auth queries
- * (get_available_models, get_login_providers, get_state). These commands do
- * not belong to any user session, so they run against a single lazily-started
- * RPC process that is killed after ~60s of inactivity. Access is serialized:
- * the omp RPC loop handles one command at a time anyway, and serialization
- * lets lazy start/idle-kill stay race-free.
+ * Short-lived contextual registry/auth processes. Each trusted launch identity
+ * has one serialized queue. Configuration changes retire a process only between
+ * commands, never while its owner is waiting for a response.
  *
  * Real user sessions must use lib/rpc-manager.ts instead — this process runs
  * with --no-session and its agent state is throwaway.
@@ -57,60 +54,64 @@ interface UtilityRpcState {
   proc: RpcProcess | null;
   idleTimer: NodeJS.Timeout | null;
   queue: Promise<void>;
+  revision: string | null;
 }
 
 declare global {
-  var __ompUtilityRpcState: UtilityRpcState | undefined;
+  var __ompUtilityRpcStates: Map<string, UtilityRpcState> | undefined;
 }
 
-function getState(): UtilityRpcState {
-  if (!globalThis.__ompUtilityRpcState) {
-    globalThis.__ompUtilityRpcState = { proc: null, idleTimer: null, queue: Promise.resolve() };
-    // Mirror the session registry in lib/rpc-manager.ts: dispose the shared
-    // utility omp process on server shutdown so it does not outlive the server.
-    // Idempotent and safe to call any time (clears the idle timer + disposes).
+function getState(context: OmpConfigurationContext): UtilityRpcState {
+  if (!globalThis.__ompUtilityRpcStates) {
+    globalThis.__ompUtilityRpcStates = new Map();
     const cleanup = () => disposeUtilityRpc();
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
     process.once("SIGTERM", cleanup);
   }
-  return globalThis.__ompUtilityRpcState;
-}
-
-/**
- * Tear down the shared utility omp process immediately (skip the idle timer).
- * Registered as a server-shutdown hook in getState() above (mirroring the
- * session registry in lib/rpc-manager.ts) so the utility process does not
- * outlive the server; also safe to call any time — it just clears any pending
- * idle kill and disposes the live child.
- */
-export function disposeUtilityRpc(): void {
-  const state = globalThis.__ompUtilityRpcState;
-  if (!state) return;
-  if (state.idleTimer) {
-    clearTimeout(state.idleTimer);
-    state.idleTimer = null;
+  let state = globalThis.__ompUtilityRpcStates.get(context.processIdentity);
+  if (!state) {
+    state = { proc: null, idleTimer: null, queue: Promise.resolve(), revision: null };
+    globalThis.__ompUtilityRpcStates.set(context.processIdentity, state);
   }
-  const proc = state.proc;
-  state.proc = null;
-  if (proc) void proc.dispose();
+  return state;
 }
 
-function scheduleIdleKill(state: UtilityRpcState): void {
-  if (state.idleTimer) clearTimeout(state.idleTimer);
+/** Immediate disposal is reserved for server shutdown, not configuration saves. */
+export function disposeUtilityRpc(): void {
+  for (const state of globalThis.__ompUtilityRpcStates?.values() ?? []) {
+    clearTimeout(state.idleTimer ?? undefined);
+    state.idleTimer = null;
+    const proc = state.proc;
+    state.proc = null;
+    if (proc) void proc.dispose();
+  }
+}
+
+/** Configuration writes invalidate the next registry process without interrupting
+ * an in-flight command or login. Read-only settings queries never call this. */
+export function invalidateUtilityRpc(): void {
+  for (const state of globalThis.__ompUtilityRpcStates?.values() ?? []) state.revision = null;
+}
+
+function scheduleIdleKill(state: UtilityRpcState, identity: string): void {
+  clearTimeout(state.idleTimer ?? undefined);
   state.idleTimer = setTimeout(() => {
     state.idleTimer = null;
     const proc = state.proc;
     state.proc = null;
+    if (globalThis.__ompUtilityRpcStates?.get(identity) === state) globalThis.__ompUtilityRpcStates.delete(identity);
     if (proc) void proc.dispose();
   }, IDLE_KILL_MS);
   state.idleTimer.unref?.();
 }
 
-async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
+async function startProcess(state: UtilityRpcState, context: OmpConfigurationContext): Promise<RpcProcess> {
   const proc = new RpcProcess({
-    cwd: homedir(),
-    extraArgs: UTILITY_EXTRA_ARGS,
+    cwd: context.view.cwd,
+    binary: context.view.binary,
+    environment: context.env,
+    extraArgs: [...context.launchArgs, ...UTILITY_EXTRA_ARGS],
     onExit: () => {
       if (state.proc === proc) state.proc = null;
     },
@@ -128,22 +129,28 @@ async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
 /** Run one RPC command on the shared utility process (lazy start, serialized,
  * idle-killed). Rejections from earlier commands never poison the queue. */
 export function runUtilityCommand<T = unknown>(
+  context: OmpConfigurationContext,
   command: { type: string; [key: string]: unknown },
   timeoutMs: number = DEFAULT_COMMAND_TIMEOUT_MS,
 ): Promise<T> {
-  const state = getState();
+  const state = getState(context);
   const run = state.queue.then(async () => {
     if (state.idleTimer) {
       clearTimeout(state.idleTimer);
       state.idleTimer = null;
     }
     try {
+      if (state.proc && state.revision !== context.configurationRevision) {
+        await state.proc.dispose();
+        state.proc = null;
+      }
       if (!state.proc || !state.proc.isAlive) {
-        state.proc = await startProcess(state);
+        state.revision = context.configurationRevision;
+        state.proc = await startProcess(state, context);
       }
       return await state.proc.sendCommand<T>(command, timeoutMs);
     } finally {
-      scheduleIdleKill(state);
+      scheduleIdleKill(state, context.processIdentity);
     }
   });
   state.queue = run.then(
@@ -162,13 +169,15 @@ export function runUtilityCommand<T = unknown>(
  * Request should pass `request.signal` so a disconnected client does not keep
  * a 60s registry spawn running. */
 export async function runIsolatedUtilityCommand<T = unknown>(
+  context: OmpConfigurationContext,
   command: { type: string; [key: string]: unknown },
-  options: { env?: Record<string, string>; cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<T> {
   const proc = new RpcProcess({
-    cwd: options.cwd ?? homedir(),
-    extraArgs: UTILITY_EXTRA_ARGS,
-    env: options.env,
+    cwd: context.view.cwd,
+    binary: context.view.binary,
+    extraArgs: [...context.launchArgs, ...UTILITY_EXTRA_ARGS],
+    environment: context.env,
   });
   const signal = options.signal;
   const onAbort = () => { void proc.dispose(); };

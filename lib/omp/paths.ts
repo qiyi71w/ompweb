@@ -7,9 +7,9 @@ import * as path from "path";
  * omp-web cannot import the Bun-only @oh-my-pi packages, so the layout rules
  * are replicated here. Covered: PI_CODING_AGENT_DIR override, PI_CONFIG_DIR
  * rename, and the XDG data layout (used only when $XDG_DATA_HOME/omp already
- * exists, mirroring omp's opt-in migration). Named profiles
- * (OMP_PROFILE/PI_PROFILE) are intentionally unsupported: omp-web always
- * resolves the default profile location.
+ * exists, mirroring omp's opt-in migration). These helpers describe the Web
+ * server's default storage anchor. Named-profile/session storage is resolved by
+ * configuration-context.ts and retained by session-reference.ts, not guessed here.
  */
 
 const APP_NAME = "omp";

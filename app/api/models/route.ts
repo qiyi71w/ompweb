@@ -1,41 +1,10 @@
-import { statSync } from "fs";
-import { invalidateModelsCache, loadModelsWithCache, withModelRuntimeError, withSafeModelLoadFailure, type ModelsData } from "@/lib/models-cache";
-import { disposeUtilityRpc, runUtilityCommand, type OmpModel } from "@/lib/omp/rpc-utility";
-import { getModelsConfigPath } from "@/lib/omp/paths";
+import { loadModelsWithCache, withModelRuntimeError, withSafeModelLoadFailure, type ModelsData } from "@/lib/models-cache";
+import { runUtilityCommand, type OmpModel } from "@/lib/omp/rpc-utility";
+import { resolveConfigurationContext, type OmpConfigurationContext } from "@/lib/omp/configuration-context";
 import { readDisabledProviders } from "@/lib/omp/model-roles";
-import { readAnthropicSlowMode } from "@/lib/omp/settings-config";
 
 export const dynamic = "force-dynamic";
 
-// The omp model registry (auth + models.yml) is global, not per-cwd, so one
-// cache entry serves every request. The ?cwd= query parameter is still
-// accepted for client compatibility but no longer affects the result.
-const MODELS_CACHE_KEY = "global";
-
-declare global {
-  var __ompModelsConfigFingerprint: string | undefined;
-}
-
-function refreshModelsIfConfigChanged(): void {
-  const path = getModelsConfigPath();
-  let fingerprint = `${path}:missing`;
-  try {
-    const stat = statSync(path);
-    fingerprint = `${path}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
-  } catch {
-    // A missing models file is a valid state; the fingerprint still detects
-    // its later creation.
-  }
-
-  const previous = globalThis.__ompModelsConfigFingerprint;
-  globalThis.__ompModelsConfigFingerprint = fingerprint;
-  if (previous !== undefined && previous !== fingerprint) {
-    // The utility process reads models.yml once at startup. External edits
-    // therefore need the same invalidation as the web editor's PUT route.
-    invalidateModelsCache();
-    disposeUtilityRpc();
-  }
-}
 
 const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -67,8 +36,9 @@ function supportsFastMode(model: OmpModel): boolean {
 // ponytail: provider-only; OpenRouter's openai/google ids need omp's model identity.
 const SLOW_MODE_PROVIDERS: Record<string, true> = { anthropic: true, openai: true, "openai-codex": true, google: true, "google-vertex": true };
 
-async function loadModels(): Promise<ModelsData> {
+async function loadModels(context: OmpConfigurationContext): Promise<ModelsData> {
   const availableResponse = await runUtilityCommand<{ models?: unknown }>(
+    context,
     { type: "get_available_models" },
     120_000,
   );
@@ -91,6 +61,7 @@ async function loadModels(): Promise<ModelsData> {
     .map((m) => ({ id: m.id, name: m.name, provider: m.provider, thinkingLevels: thinkingLevelsFor(m), supportsFastMode: supportsFastMode(m), supportsSlowMode: SLOW_MODE_PROVIDERS[m.provider] === true, contextWindow: m.contextWindow ?? undefined, maxTokens: m.maxTokens ?? undefined }))
     .sort(compareModelEntries);
   const loginResponse = await runUtilityCommand<{ providers?: unknown }>(
+    context,
     { type: "get_login_providers" },
     30_000,
   );
@@ -102,7 +73,7 @@ async function loadModels(): Promise<ModelsData> {
       && typeof (provider as { authenticated?: unknown }).authenticated === "boolean"
     ))
     : [];
-  const disabledProviders = readDisabledProviders();
+  const disabledProviders = await readDisabledProviders(context);
   const connectedProviders = loginProviders
     .filter((provider) => provider.authenticated)
     .map((provider) => ({ id: provider.id, name: provider.name, disabled: disabledProviders.has(provider.id) }));
@@ -115,11 +86,16 @@ async function loadModels(): Promise<ModelsData> {
   // omp resolves the default model at session start; a --no-session utility
   // process reports it via get_state.
   let defaultModel: { provider: string; modelId: string } | null = null;
+  let defaultThinkingLevel: string | undefined;
+  let anthropicSlowMode = false;
   try {
-    const state = await runUtilityCommand<{ model?: { provider?: string; id?: string } }>(
+    const state = await runUtilityCommand<{ model?: { provider?: string; id?: string }; thinkingLevel?: string; slowModeEnabled?: boolean }>(
+      context,
       { type: "get_state" },
       30_000,
     );
+    defaultThinkingLevel = state.thinkingLevel;
+    anthropicSlowMode = state.model?.provider === "anthropic" && state.slowModeEnabled === true;
     const provider = state.model?.provider;
     const modelId = state.model?.id;
     if (provider && modelId && available.some((m) => m.provider === provider && m.id === modelId)) {
@@ -130,7 +106,7 @@ async function loadModels(): Promise<ModelsData> {
   }
 
   return withModelRuntimeError(
-    { models: Object.fromEntries(nameMap), modelList, defaultModel, thinkingLevels, connectedProviders },
+    { models: Object.fromEntries(nameMap), modelList, defaultModel, defaultThinkingLevel, anthropicSlowMode, thinkingLevels, connectedProviders },
     undefined,
   );
 }
@@ -142,13 +118,12 @@ const EMPTY_MODELS: ModelsData = {
   thinkingLevels: {},
 };
 
-export async function GET() {
-  refreshModelsIfConfigChanged();
-  // Outside the cache: `/slow` on a Claude model rewrites config.yml.
-  const anthropicSlowMode = readAnthropicSlowMode();
+export async function GET(request: Request) {
   try {
-    return Response.json({ ...await loadModelsWithCache(MODELS_CACHE_KEY, () => loadModels()), anthropicSlowMode });
+    const url = new URL(request.url);
+    const context = await resolveConfigurationContext({ cwd: url.searchParams.get("cwd"), sessionId: url.searchParams.get("sessionId") });
+    return Response.json(await loadModelsWithCache(context.configurationRevision, () => loadModels(context)));
   } catch {
-    return Response.json({ ...withSafeModelLoadFailure(EMPTY_MODELS), anthropicSlowMode });
+    return Response.json(withSafeModelLoadFailure(EMPTY_MODELS), { status: 400 });
   }
 }

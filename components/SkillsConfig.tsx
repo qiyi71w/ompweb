@@ -12,11 +12,13 @@ import { toast } from "@/components/ui/toast";
 import { Plus } from "lucide-react";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { SkillDiagnosticsInspector } from "./SkillDiagnostics";
+import { NATIVE_SETTINGS_CHANGED_EVENT } from "@/hooks/useNativeSettings";
 import type {
   SkillInfo as Skill,
   SkillInstallScope,
   SkillSearchResult,
   SkillUpdateResult,
+  SkillsDiscovery,
 } from "@/lib/api-types";
 
 function SkillsConfigSurface({ embedded, isMobile, onClose, children }: { embedded: boolean; isMobile: boolean; onClose: () => void; children: React.ReactNode }) {
@@ -155,6 +157,11 @@ function SkillDetail({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div role="status" className="text-sm text-muted">
+        <p>{t(skill.installed ? "skillsConfig.installedOnDisk" : "skillsConfig.notInstalled")}</p>
+        <p>{t(skill.discovered ? "skillsConfig.discovered" : "skillsConfig.notDiscovered")}</p>
+        <p>{t("skillsConfig.loadedUnknown")}</p>
+      </div>
       {/* Path + tag + toggle */}
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <span
@@ -379,10 +386,12 @@ function SkillDetail({
 
 function AddSkillPanel({
   cwd,
+  sessionId,
   installedPackages,
   onInstalled,
 }: {
   cwd: string;
+  sessionId?: string | null;
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   onInstalled: () => void;
 }) {
@@ -440,7 +449,7 @@ function AddSkillPanel({
         const res = await fetch("/api/skills/install", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ package: pkg, scope, cwd }),
+          body: JSON.stringify({ package: pkg, scope, cwd, sessionId }),
         });
         const d = (await res.json()) as { success?: boolean; error?: string; code?: string };
         if (!res.ok || d.error) {
@@ -457,7 +466,7 @@ function AddSkillPanel({
         setInstalling(null);
       }
     },
-    [onInstalled, scope, cwd],
+    [onInstalled, scope, cwd, sessionId],
   );
 
   const installPath =
@@ -740,6 +749,8 @@ export function SkillsConfig({
   const isMobile = useIsMobile();
   const { t, tn } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [discovery, setDiscovery] = useState<SkillsDiscovery | null>(null);
+  const [contextId, setContextId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -756,12 +767,16 @@ export function SkillsConfig({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
-      const d = (await res.json()) as { skills?: Skill[]; error?: string; code?: string };
+      const params = new URLSearchParams({ cwd });
+      if (sessionId) params.set("sessionId", sessionId);
+      const res = await fetch(`/api/skills?${params}`);
+      const d = (await res.json()) as { skills?: Skill[]; discovery?: SkillsDiscovery; context?: { id: string }; error?: string; code?: string };
       if (!res.ok || d.error) throw new Error(formatApiError(d.error ? d : `HTTP ${res.status}`));
       const list = d.skills ?? [];
       setSkills(list);
-      if (list.length > 0 && !selected) setSelected(list[0].filePath);
+      setDiscovery(d.discovery ?? null);
+      setContextId(d.context?.id ?? "");
+      setSelected((current) => list.some((skill) => skill.filePath === current) ? current : list[0]?.filePath ?? null);
       return list;
     } catch (e) {
       setError(String(e));
@@ -769,13 +784,16 @@ export function SkillsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd, selected]);
+  }, [cwd, sessionId]);
 
   useEffect(() => {
     setUpdateStatuses({});
     setUpdateError(null);
     void loadSkills();
-  }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
+    const refresh = () => { void loadSkills(); };
+    window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh);
+    return () => window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, refresh);
+  }, [loadSkills]);
 
   const checkForUpdates = useCallback(async (skill?: Skill) => {
     const targets = skill
@@ -795,6 +813,7 @@ export function SkillsConfig({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cwd,
+          sessionId,
           package: skill?.install?.package,
           scope: skill?.install?.scope,
         }),
@@ -821,7 +840,7 @@ export function SkillsConfig({
       });
       if (!skill) setCheckingAll(false);
     }
-  }, [cwd, skills]);
+  }, [cwd, sessionId, skills]);
 
   const updateInstalledSkill = useCallback(async (skill: Skill) => {
     if (!skill.install) return;
@@ -834,6 +853,7 @@ export function SkillsConfig({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cwd,
+          sessionId,
           package: skill.install.package,
           scope: skill.install.scope,
         }),
@@ -863,7 +883,7 @@ export function SkillsConfig({
     } finally {
       setUpdatingSkill(null);
     }
-  }, [cwd, loadSkills]);
+  }, [cwd, sessionId, loadSkills]);
 
   const toggle = useCallback(async (skill: Skill) => {
     const next = !skill.disableModelInvocation;
@@ -877,22 +897,21 @@ export function SkillsConfig({
           filePath: skill.filePath,
           disableModelInvocation: next,
           cwd,
+          sessionId,
+          contextId,
+          baseline: skill.toggleBaseline,
         }),
       });
-      const d = (await res.json()) as { success?: boolean; error?: string };
+      const d = (await res.json()) as { success?: boolean; error?: string; skills?: Skill[]; context?: { id: string }; discovery?: SkillsDiscovery };
+      if (d.skills) setSkills(d.skills);
+      if (d.context) setContextId(d.context.id);
+      if (d.discovery) setDiscovery(d.discovery);
       if (!res.ok || d.error) {
-        const msg = d.error ?? `HTTP ${res.status}`;
+        const msg = res.status === 409 ? t("nativeSettings.conflict") : d.error ?? `HTTP ${res.status}`;
         setSaveError(msg);
         toast.error(t("skillsConfig.toggleErrorTitle"), msg);
         return;
       }
-      setSkills((prev) =>
-        prev.map((s) =>
-          s.filePath === skill.filePath
-            ? { ...s, disableModelInvocation: next }
-            : s,
-        ),
-      );
       toast.success(t("skillsConfig.toggleSuccessTitle"));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -905,7 +924,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, [cwd, t]);
+  }, [cwd, sessionId, contextId, t]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
@@ -961,6 +980,9 @@ export function SkillsConfig({
         </div>)}
         {!embedded && onSelectTab && <SettingsTabs active="skills" onSelect={onSelectTab} />}
         <div className="grid gap-1 border-b border-border px-3 py-2">
+          <p className="text-sm text-muted" role="status">{discovery && t(discovery.authority === "native" ? "skillsConfig.authoritative" : "skillsConfig.fallback")}</p>
+          <p className="text-sm text-muted">{t("skillsConfig.installSourceBoundary")}</p>
+          {discovery && <details className="text-sm text-muted"><summary>{t("skillsConfig.sourceSwitches")}</summary>{Object.entries(discovery.sourceSwitches).map(([key, value]) => <p key={key}><code>{key}</code>: {t(value === null ? "skillsConfig.stateUnknown" : value ? "skillsConfig.stateEnabled" : "skillsConfig.stateDisabled")}</p>)}</details>}
           <SkillDiagnosticsInspector sessionId={sessionId} />
         </div>
 
@@ -1209,6 +1231,7 @@ export function SkillsConfig({
             {addMode ? (
               <AddSkillPanel
                 cwd={cwd}
+                sessionId={sessionId}
                 installedPackages={{
                   global: new Set(
                     skills

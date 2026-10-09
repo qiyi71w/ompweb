@@ -680,7 +680,7 @@ function AudioViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
   );
 }
 
-function DocumentViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
+function DocumentViewer({ filePath, sourceSessionId, active = true }: Props) {
   const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);

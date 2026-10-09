@@ -9,6 +9,8 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useNavigationHistory } from "@/hooks/useNavigationHistory";
 import { isMacPlatform, navigateShortcutHint, NAVIGATION_HISTORY_MAX_ENTRIES } from "@/lib/navigation-history";
 import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
+import { NATIVE_SETTINGS_CHANGED_EVENT, nativeSettingsUrl } from "@/hooks/useNativeSettings";
+import type { NativeSettingsView } from "@/lib/omp/settings-contract";
 import { SessionSidebar } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
@@ -135,19 +137,30 @@ export function AppShell({ appName }: { appName: string }) {
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
   const [hideThinkingBlock, setHideThinkingBlock] = useState(false);
+  const nativeSettingsContextUrl = nativeSettingsUrl(selectedSession?.cwd ?? newSessionCwd ?? workspaceOptions.cwd, selectedSession?.id);
   useEffect(() => {
-    // omp's own setting, so the transcript hides thinking when the TUI does.
-    // Re-read on focus: the TUI or another tab may have changed it.
+    let active = true;
+    let generation = 0;
+    setHideThinkingBlock(false);
     const load = () => {
-      fetch("/api/omp-settings")
+      const requestGeneration = ++generation;
+      fetch(nativeSettingsContextUrl, { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
-        .then((data: { settings?: { hideThinkingBlock?: boolean } } | null) => { if (data) setHideThinkingBlock(data.settings?.hideThinkingBlock === true); })
-        .catch(() => {});
+        .then((data: NativeSettingsView | null) => {
+          if (!active || generation !== requestGeneration) return;
+          const field = data?.fields.hideThinkingBlock;
+          const value = field?.effective.known && typeof field.effective.value === "boolean"
+            ? field.effective.value
+            : field?.native.known && typeof field.native.value === "boolean" ? field.native.value : false;
+          setHideThinkingBlock(value);
+        })
+        .catch(() => { if (active && generation === requestGeneration) setHideThinkingBlock(false); });
     };
     load();
     window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
-  }, []);
+    window.addEventListener(NATIVE_SETTINGS_CHANGED_EVENT, load);
+    return () => { active = false; window.removeEventListener("focus", load); window.removeEventListener(NATIVE_SETTINGS_CHANGED_EVENT, load); };
+  }, [nativeSettingsContextUrl]);
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
   const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);
   const [openUrlAutomatically, setOpenUrlAutomatically] = useState(false);
@@ -297,7 +310,7 @@ export function AppShell({ appName }: { appName: string }) {
     if (container && active instanceof HTMLElement && container.contains(active)) {
       active.blur();
     }
-  }, [sidebarOpen, mobileSidebarReady]);
+  }, [sidebarOpen, mobileSidebarReady, sidebarContainerRef]);
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/omp-update", {
@@ -842,7 +855,7 @@ export function AppShell({ appName }: { appName: string }) {
     sidebarResizeHandlersRef.current = { onMove, onUp };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [isMobile, sidebarWidth]);
+  }, [isMobile, sidebarWidth, sidebarContainerRef]);
 
   // If the app unmounts mid-drag, remove the window listeners and restore the
   // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
@@ -856,82 +869,6 @@ export function AppShell({ appName }: { appName: string }) {
     document.body.style.userSelect = "";
   }, []);
 
-  const resetRightPanelWidth = useCallback(() => {
-    rightPanelRef.current?.style.removeProperty("--right-panel-width");
-    setRightPanelWidth(null);
-  }, []);
-
-  const changeRightPanelWidth = useCallback((delta: number) => {
-    setRightPanelWidth((prev) => {
-      // Keyboard steps from the fluid default start at the panel's live
-      // width so the first press doesn't jump to the clamp minimum.
-      const base = prev ?? rightPanelRef.current?.getBoundingClientRect().width ?? RIGHT_PANEL_MIN_WIDTH;
-      const next = clampRightPanelWidth(base + delta);
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      return next;
-    });
-  }, []);
-
-  const handleRightPanelResizeKey = useCallback((e: React.KeyboardEvent) => {
-    // The handle sits on the panel's left edge: left widens, right narrows.
-    if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      changeRightPanelWidth(10);
-    } else if (e.key === "ArrowRight") {
-      e.preventDefault();
-      changeRightPanelWidth(-10);
-    } else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      resetRightPanelWidth();
-    }
-  }, [changeRightPanelWidth, resetRightPanelWidth]);
-
-  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
-    if (isMobile) return;
-    e.preventDefault();
-    const startX = e.clientX;
-    // Live rect, not state: it always reflects the committed width (custom or
-    // fluid default), and keeps this callback above the state declarations
-    // without a TDZ cycle. The handle only exists while the panel is open.
-    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
-      ?? RIGHT_PANEL_MIN_WIDTH;
-    // Same --ui-scale ground truth as the left sidebar handle: clientX is in
-    // viewport pixels while the panel width is zoomed layout pixels.
-    let uiScale = 1;
-    try {
-      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
-      const value = parseFloat(raw);
-      if (Number.isFinite(value) && value > 0) uiScale = value;
-    } catch {
-      // SSR/unavailable: fall back to unscaled math.
-    }
-    setRightPanelResizing(true);
-    const onMove = (ev: MouseEvent) => {
-      // Dragging the left edge left grows the panel: inverse of the sidebar.
-      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
-      // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      pendingRightPanelWidthRef.current = next;
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      rightResizeHandlersRef.current = null;
-      setRightPanelResizing(false);
-      // Commit the final width so state and the persisted value agree with
-      // what the user actually dragged to.
-      setRightPanelWidth(pendingRightPanelWidthRef.current);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    pendingRightPanelWidthRef.current = startWidth;
-    rightResizeHandlersRef.current = { onMove, onUp };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [isMobile]);
 
   // If the app unmounts mid-drag, remove the window listeners and restore the
   // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
@@ -1008,6 +945,82 @@ export function AppShell({ appName }: { appName: string }) {
   });
   const pendingRightPanelWidthRef = useRef<number | null>(null);
   const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  const resetRightPanelWidth = useCallback(() => {
+    rightPanelRef.current?.style.removeProperty("--right-panel-width");
+    setRightPanelWidth(null);
+  }, [rightPanelRef]);
+
+  const changeRightPanelWidth = useCallback((delta: number) => {
+    setRightPanelWidth((prev) => {
+      // Keyboard steps from the fluid default start at the panel's live
+      // width so the first press doesn't jump to the clamp minimum.
+      const base = prev ?? rightPanelRef.current?.getBoundingClientRect().width ?? RIGHT_PANEL_MIN_WIDTH;
+      const next = clampRightPanelWidth(base + delta);
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      return next;
+    });
+  }, [rightPanelRef]);
+
+  const handleRightPanelResizeKey = useCallback((e: React.KeyboardEvent) => {
+    // The handle sits on the panel's left edge: left widens, right narrows.
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      changeRightPanelWidth(10);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      changeRightPanelWidth(-10);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      resetRightPanelWidth();
+    }
+  }, [changeRightPanelWidth, resetRightPanelWidth]);
+
+  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
+    if (isMobile) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    // Live rect, not state: it always reflects the committed width (custom or
+    // fluid default), and keeps this callback above the state declarations
+    // without a TDZ cycle. The handle only exists while the panel is open.
+    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
+      ?? RIGHT_PANEL_MIN_WIDTH;
+    // Same --ui-scale ground truth as the left sidebar handle: clientX is in
+    // viewport pixels while the panel width is zoomed layout pixels.
+    let uiScale = 1;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+      const value = parseFloat(raw);
+      if (Number.isFinite(value) && value > 0) uiScale = value;
+    } catch {
+      // SSR/unavailable: fall back to unscaled math.
+    }
+    setRightPanelResizing(true);
+    const onMove = (ev: MouseEvent) => {
+      // Dragging the left edge left grows the panel: inverse of the sidebar.
+      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
+      // Write the CSS variable straight to the DOM: the flex row follows the
+      // pointer without re-rendering the whole AppShell on every mousemove.
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      pendingRightPanelWidthRef.current = next;
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      rightResizeHandlersRef.current = null;
+      setRightPanelResizing(false);
+      // Commit the final width so state and the persisted value agree with
+      // what the user actually dragged to.
+      setRightPanelWidth(pendingRightPanelWidthRef.current);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    pendingRightPanelWidthRef.current = startWidth;
+    rightResizeHandlersRef.current = { onMove, onUp };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [isMobile, rightPanelRef]);
   useEffect(() => {
     setRightPanelWidth(loadRightPanelWidth());
   }, []);
@@ -1232,7 +1245,7 @@ export function AppShell({ appName }: { appName: string }) {
   // list itself could not be fetched (keep the entry, abort this navigation).
   const fetchSessionForNavigation = useCallback(async (sessionId: string): Promise<SessionInfo | null | "unavailable"> => {
     try {
-      const res = await fetch("/api/sessions");
+      const res = await fetch(`/api/sessions?sessionId=${encodeURIComponent(sessionId)}`);
       if (!res.ok) return "unavailable";
       const data = (await res.json()) as { sessions?: SessionInfo[] };
       return data.sessions?.find((s) => s.id === sessionId) ?? null;
@@ -1308,7 +1321,7 @@ export function AppShell({ appName }: { appName: string }) {
   // handleCwdChange relies on. Hydrate it from the session list so switching
   // worktrees right after creating a session doesn't close the chat.
   const hydrateSelectedSession = useCallback((sessionId: string) => {
-    void fetch("/api/sessions")
+    void fetch(`/api/sessions?sessionId=${encodeURIComponent(sessionId)}`)
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
@@ -1447,7 +1460,7 @@ export function AppShell({ appName }: { appName: string }) {
     const selectRestoredSession = async (attemptsLeft = 5): Promise<void> => {
       if (activeSessionIdRef.current !== sessionAtRestoreStart) return;
       try {
-        const res = await fetch("/api/sessions");
+        const res = await fetch(`/api/sessions?sessionId=${encodeURIComponent(sessionId)}`);
         if (res.ok) {
           const data = (await res.json()) as { sessions?: SessionInfo[] };
           const found = data.sessions?.find((s) => s.id === sessionId);
@@ -1750,7 +1763,7 @@ export function AppShell({ appName }: { appName: string }) {
       optimisticSession={selectedSession?.path === "" ? selectedSession : null}
       onSelectSession={handleSelectSession}
       onNewSession={handleNewSession}
-      initialSessionId={initialSessionId}
+      initialSessionId={initialSessionRestored ? null : initialSessionId}
       skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
       onInitialRestoreDone={handleInitialRestoreDone}
       refreshKey={refreshKey}
@@ -1801,6 +1814,8 @@ export function AppShell({ appName }: { appName: string }) {
         }}
       />
       <CommandPaletteMount
+        sessionId={selectedSession?.id}
+        cwd={selectedSession?.cwd || newSessionCwd}
         onSelectSession={handleSelectSession}
         onNewSession={() => {
           // An empty cwd is truthy, so showChat would render the shell while
@@ -2534,6 +2549,8 @@ export function AppShell({ appName }: { appName: string }) {
     <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (
       <ArchiveBrowser
+        sessionId={selectedSession?.id}
+        cwd={selectedSession?.cwd || newSessionCwd}
         open={archiveBrowserOpen}
         onClose={() => setArchiveBrowserOpen(false)}
         onRestored={handleArchiveRestored}

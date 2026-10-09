@@ -7,9 +7,12 @@ import {
 } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { basename, dirname, join } from "path";
+import { sessionRoot } from "@/lib/session-reference";
 
 /** POST /api/sessions/[id]/archive — stop the live child, then archive the
- * native OMP JSONL and its sibling artifacts using OMP's gc layout. */
+ * native OMP JSONL and its sibling artifacts. Standard roots retain OMP's gc
+ * layout; custom session directories retain their own archive leaf. */
 export async function POST(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -22,7 +25,8 @@ export async function POST(
     // Parent-session paths are native branch metadata. Moving only a parent
     // would leave active children pointing at a path that no longer exists,
     // flattening their tree in the sidebar. Archive leaves first instead.
-    const hasChildren = (await listAllSessions()).some((session) => session.parentSessionId === id);
+    const root = sessionRoot(id);
+    const hasChildren = (await listAllSessions(root)).some((session) => session.parentSessionId === id);
     if (hasChildren) {
       return NextResponse.json(
         { error: "Archive child sessions before archiving this session", code: "session_has_children" },
@@ -33,7 +37,7 @@ export async function POST(
     // OMP owns writes while a child is live; wait for its final flush before
     // moving the file so the archive contains the complete native transcript.
     await getRpcSession(id)?.destroyAndWait?.();
-    const archivedPath = archiveSessionFileWithArtifacts(filePath);
+    const archivedPath = archiveSessionFileWithArtifacts(filePath, { sessionsRoot: root.sessionsDir, archiveRoot: join(dirname(root.sessionsDir), "archive", basename(root.sessionsDir)) });
     clearExitedRpcSession(id);
     invalidateSessionPathCache(id);
     // The file is gone: full flush is correct (drops its caches + refreshes list).

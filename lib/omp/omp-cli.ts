@@ -11,9 +11,10 @@ import { delimiter, join } from "path";
 
 let cachedBin: string | null = null;
 let binMissAt = 0;
+let binSearchIdentity: string | undefined;
 let cachedVersion: { fingerprint: string; value: string; expiresAt: number } | null = null;
 let versionMiss: { fingerprint: string | null; retryAt: number } | null = null;
-let versionProbe: Promise<string | null> | null = null;
+const versionProbes = new Map<string | null, Promise<string | null>>();
 
 const BIN_NAME = process.platform === "win32" ? "omp.exe" : "omp";
 // .cmd/.bat launchers (e.g. OMP_WEB_OMP_BIN pointing at a wrapper script) cannot
@@ -58,9 +59,15 @@ function probeOmpBin(): string | null {
 }
 
 /** Resolve the omp binary: OMP_WEB_OMP_BIN override, then PATH lookup. Returns
- * null when omp is not installed. A hit is cached for the process lifetime; a
- * miss is re-probed after MISS_TTL_MS. */
+ * null when omp is not installed. Rechecks selection when the trusted search
+ * environment changes; a miss is re-probed after MISS_TTL_MS. */
 export function resolveOmpBin(): string | null {
+  const searchIdentity = JSON.stringify([process.env.OMP_WEB_OMP_BIN, process.env.PATH, homedir()]);
+  if (searchIdentity !== binSearchIdentity) {
+    binSearchIdentity = searchIdentity;
+    cachedBin = null;
+    binMissAt = 0;
+  }
   // A global Bun/npm update can replace or remove its launcher while this
   // Next.js process is still alive. Never keep returning a stale cache entry.
   if (cachedBin && existsSync(cachedBin)) return cachedBin;
@@ -80,10 +87,14 @@ export function resolveOmpBin(): string | null {
  * results without launching omp on every visit. An expiry covers opaque
  * launchers; concurrent callers share a probe. */
 export function getOmpVersion(): Promise<string | null> {
-  versionProbe ??= probeOmpVersion().finally(() => {
-    versionProbe = null;
-  });
-  return versionProbe;
+  const bin = resolveOmpBin();
+  const fingerprint = bin ? versionFingerprint(bin) : null;
+  let probe = versionProbes.get(fingerprint);
+  if (!probe) {
+    probe = probeOmpVersion(bin, fingerprint).finally(() => versionProbes.delete(fingerprint));
+    versionProbes.set(fingerprint, probe);
+  }
+  return probe;
 }
 
 /** Identity of the binary on disk; changes when it is replaced or updated. */
@@ -97,9 +108,7 @@ export function versionFingerprint(bin: string): string | null {
   }
 }
 
-async function probeOmpVersion(): Promise<string | null> {
-  const bin = resolveOmpBin();
-  const fingerprint = bin ? versionFingerprint(bin) : null;
+async function probeOmpVersion(bin: string | null, fingerprint: string | null): Promise<string | null> {
   const now = Date.now();
   if (fingerprint && cachedVersion?.fingerprint === fingerprint && now < cachedVersion.expiresAt) {
     return cachedVersion.value;

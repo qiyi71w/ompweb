@@ -1,3 +1,4 @@
+import { resolveConfigurationContext } from "@/lib/omp/configuration-context";
 import { type OmpLoginProvider, runUtilityCommand } from "@/lib/omp/rpc-utility";
 
 export const dynamic = "force-dynamic";
@@ -5,9 +6,12 @@ export const dynamic = "force-dynamic";
 // Login-capable providers via the omp RPC get_login_providers command. This is
 // omp's own /login list (OAuth subscriptions plus key-creation flows), so no
 // hardcoded exclusions or display-name overrides are needed anymore.
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const url = new URL(request.url);
+    const context = await resolveConfigurationContext({ cwd: url.searchParams.get("cwd"), sessionId: url.searchParams.get("sessionId") });
     const response = await runUtilityCommand<{ providers?: unknown }>(
+      context,
       { type: "get_login_providers" },
       30_000,
     );

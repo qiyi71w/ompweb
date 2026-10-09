@@ -1,8 +1,7 @@
-import { homedir } from "os";
+import { resolveConfigurationContext, type OmpConfigurationContext } from "@/lib/omp/configuration-context";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
-import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
+import { invalidateUtilityRpc } from "@/lib/omp/rpc-utility";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +21,7 @@ const HEARTBEAT_MS = 30_000;
 
 interface PendingLogin {
   provider: string;
+  context: OmpConfigurationContext;
   submit: (value: string) => void;
 }
 
@@ -69,6 +69,8 @@ export async function GET(
   { params }: { params: Promise<{ provider: string }> }
 ) {
   const { provider } = await params;
+  const url = new URL(req.url);
+  const context = await resolveConfigurationContext({ cwd: url.searchParams.get("cwd"), sessionId: url.searchParams.get("sessionId") });
   const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const registry = getLoginRegistry();
   const encoder = new TextEncoder();
@@ -134,7 +136,7 @@ export async function GET(
       };
 
       try {
-        proc = new RpcProcess({ cwd: homedir(), extraArgs: LOGIN_EXTRA_ARGS, onFrame: handleFrame });
+        proc = new RpcProcess({ cwd: context.view.cwd, binary: context.view.binary, environment: context.env, extraArgs: [...context.launchArgs, ...LOGIN_EXTRA_ARGS], onFrame: handleFrame });
       } catch (error) {
         send({ type: "error", message: error instanceof Error ? error.message : String(error) });
         clearInterval(heartbeat);
@@ -146,6 +148,7 @@ export async function GET(
 
       registry.set(token, {
         provider,
+        context,
         submit: (value: string) => {
           if (pendingInputId !== null) {
             const id = pendingInputId;
@@ -168,9 +171,10 @@ export async function GET(
         const ready = await child.waitReady(READY_TIMEOUT_MS);
         await child.negotiateProtocol(ready);
         await child.sendCommand({ type: "login", providerId: provider }, LOGIN_TIMEOUT_MS);
-        enableProvider(provider);
+        // Authentication does not overwrite registry filters. Re-enable through
+        // the explicit scoped Models action, carrying its displayed baseline.
         invalidateModelsCache();
-        disposeUtilityRpc();
+        invalidateUtilityRpc();
         send({ type: "success" });
       } catch (error) {
         if (req.signal.aborted) {

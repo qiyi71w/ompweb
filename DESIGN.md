@@ -99,6 +99,88 @@ state.
 Models and allow-listed OMP settings use surgical YAML updates that preserve
 unrelated content. Plugin operations run the installed `omp plugin` CLI. MCP
 configuration is project-local, validated before writing, and saved atomically.
+MCP uses `jsonc-parser` path edits after strict JSON validation, with the shared
+configuration-file queue/HMAC/atomic replacement and the existing MCP lock.
+Field baselines allow unrelated edits to merge; rename/delete baselines protect
+the whole entity. Credential values stay server-side unless explicitly replaced.
+Static inventory and native observations are separate DTOs: a compact native
+configuration list establishes neither loaded nor connected state. GET never
+starts a session; a visible `start-live` action may start the selected context.
+
+
+The common settings adapter resolves a trusted configuration context with
+`resolveConfigurationContext({ cwd?, sessionId? })`: the installed binary and
+version, authorized workspace, agent directory, profile, validated launch
+arguments and agent environment. Browser requests cannot select a binary,
+configuration root or environment. Validated `--config` layers follow
+`PI_CONFIG_FILES` in native order and are read overlays, not save targets.
+
+Retained sessions supply their root-qualified identity to composer model and
+skill-badge queries, including when switching sessions in the same workspace.
+Late responses from the previous context are ignored. New-chat queries remain
+cwd-based. Qualified session-list results and in-flight loads use the complete
+registered root identity; the lower-level physical file scan can still be shared.
+Ordinary reads and busy-session reuse retain the running child's environment.
+Explicit `/reload` applies the latest permitted Web `agentEnv` overrides (including
+removals) while preserving the selected root, profile and trusted launch arguments.
+
+`GET /api/omp-settings?cwd=…&sessionId=…&scope=global|project` queries a fresh
+`omp config list --json` process and returns `NativeSettingsView`. Each field
+separates its saved existence/value/token, native-query value and effective
+value, capability, editability and application hint. Session-only thinking or
+advisor overrides make the effective value unknown; the native-query result
+remains distinct. Unknown/unsupported/complex fields stay visible and safe.
+Transcript thinking visibility uses a known effective boolean, otherwise the
+known native-query boolean. This rendering preference does not turn an offline
+session's unknown effective value into a claimed runtime value. Missing/failed
+reads and context changes reset the UI preference to its existing false default.
+
+`PUT` accepts `{ contextId, scope, operations }`. Each operation has `key`,
+`op: "set" | "unset"`, an original `baseline` from `field.saved`, and `value`
+only for `set`. Opaque per-field baselines bind context, selected file and the
+field's nested/dotted/legacy locations. Unrelated edits merge; conflicts return
+HTTP 409 with safe `latest` and `conflicts` fields. A conflict is reviewed and
+refreshed explicitly, never replayed automatically.
+
+Writes retain YAML comments, unknown members and complex data through the YAML
+AST, serialize Web writes per layer and atomically replace the selected file.
+This is not a cross-process transaction: an external writer can race the final
+replacement. Reads never materialize defaults or quarantine invalid YAML;
+failed capability or YAML checks are read-only. A fresh read follows each
+write; registry caches invalidate after active utility work completes, without
+stopping sessions. Persistence reports `appliedToRunningSessions: false`.
+Successful client writes emit `omp-native-settings-changed`; other mounted
+settings views and the transcript preference reader requery their own trusted
+context. Invalidation received during a save waits for success; a displayed
+409 still requires deliberate review and refresh.
+
+The finite contract covers 39 editable fields plus the read-only native
+`providers.autoThinkingMaxEffort` ceiling. Native registrations gate support,
+including dynamic approval members under `tools.approval`. Finite numbers use
+the native numeric domain, rather than TUI quick-pick bounds. `false`, `0`,
+`[]` and an absent override remain distinct. Existing global `config.yaml`
+is retained. OMP 18.8.4 ignores project `.omp/config.yaml`; that target is
+explicitly read-only, with saved/native disagreement shown and no shadow
+`config.yml` created. Ordinary project `.omp/config.yml` supports set/unset.
+
+Approval fields carry a literal `policyKey`. The suffix of
+`tools.approval.<name>` is one dictionary member, addressed as
+`["tools", "approval", name]`, never split on punctuation. Reads discover the
+union of native and selected-layer members; repeated `approvalKey` GET
+parameters request baselines for prospective members. The controller's
+`discoverApproval(name)` adds a server-issued field baseline while retaining
+the displayed baselines of existing entries. Set/unset uses the same operation,
+HMAC and conflict protocol as finite fields. Ordinary unregistered keys remain
+outside the editable contract.
+
+Each approval update changes only its selected native dictionary entry.
+Top-level dotted configuration remains untouched; OMP 18.8.4 does not use it
+as a native approval dictionary. Unknown policy strings and complex members
+remain preserved and read-only. An absent entry is not an explicit `prompt`;
+the engine owns tool tiers, policy-key fallback and execution decisions.
+The Web wrapper retains pending extension UI requests for replay and forwards
+user responses. It does not derive authorization from titles or interpret
+the legacy `extension` member as a whole-class permission.
 
 ### Reconnect and foreground catch-up
 
