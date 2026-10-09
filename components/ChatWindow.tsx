@@ -1110,6 +1110,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      sessionId={session?.id}
       /* The pill bar and chevron only render in the non-empty layout; don't
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */

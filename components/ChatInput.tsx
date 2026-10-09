@@ -220,6 +220,7 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  sessionId?: string | null;
   activeGoal?: ActiveGoal | null;
   activePlan?: ActivePlan | null;
   advisorEnabled?: boolean;
@@ -340,6 +341,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onPromoteQueuedToSteer,
   draftKey = "new:unassigned",
   cwd,
+  sessionId,
   activeGoal,
   activePlan,
   advisorEnabled,
@@ -979,17 +981,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const slashMenuOpenActive = slashQuery !== null;
   useEffect(() => {
+    setDormantSkillNames(new Set());
     if (!slashMenuOpenActive || !cwd) return;
     const controller = new AbortController();
-    void fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`, { signal: controller.signal })
+    const query = new URLSearchParams({ cwd });
+    if (sessionId) query.set("sessionId", sessionId);
+    void fetch(`/api/skills?${query}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ skills?: Array<{ name?: string; disableModelInvocation?: boolean }> }> : null)
       .then((data) => {
-        if (!data) return;
+        if (!data || controller.signal.aborted) return;
         setDormantSkillNames(new Set((data.skills ?? []).flatMap((skill) => skill.disableModelInvocation && skill.name ? [skill.name] : [])));
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [cwd, slashMenuOpenActive]);
+  }, [cwd, sessionId, slashMenuOpenActive]);
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => BUILTIN_SLASH_COMMAND_DEFS

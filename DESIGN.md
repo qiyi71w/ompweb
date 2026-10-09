@@ -115,12 +115,25 @@ arguments and agent environment. Browser requests cannot select a binary,
 configuration root or environment. Validated `--config` layers follow
 `PI_CONFIG_FILES` in native order and are read overlays, not save targets.
 
+Retained sessions supply their root-qualified identity to composer model and
+skill-badge queries, including when switching sessions in the same workspace.
+Late responses from the previous context are ignored. New-chat queries remain
+cwd-based. Qualified session-list results and in-flight loads use the complete
+registered root identity; the lower-level physical file scan can still be shared.
+Ordinary reads and busy-session reuse retain the running child's environment.
+Explicit `/reload` applies the latest permitted Web `agentEnv` overrides (including
+removals) while preserving the selected root, profile and trusted launch arguments.
+
 `GET /api/omp-settings?cwd=…&sessionId=…&scope=global|project` queries a fresh
 `omp config list --json` process and returns `NativeSettingsView`. Each field
 separates its saved existence/value/token, native-query value and effective
 value, capability, editability and application hint. Session-only thinking or
 advisor overrides make the effective value unknown; the native-query result
 remains distinct. Unknown/unsupported/complex fields stay visible and safe.
+Transcript thinking visibility uses a known effective boolean, otherwise the
+known native-query boolean. This rendering preference does not turn an offline
+session's unknown effective value into a claimed runtime value. Missing/failed
+reads and context changes reset the UI preference to its existing false default.
 
 `PUT` accepts `{ contextId, scope, operations }`. Each operation has `key`,
 `op: "set" | "unset"`, an original `baseline` from `field.saved`, and `value`

@@ -36,6 +36,46 @@ function Guard() {
   return null;
 }
 
+test("skill badge inventory follows retained identity, clears old state and fences late responses", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousScroll = window.HTMLElement.prototype.scrollIntoView;
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const requests = [];
+  let finishA;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname !== "/api/skills") return { ok: true, json: async () => ({}) };
+    requests.push(url);
+    if (url.searchParams.get("sessionId") === "profile-a") {
+      return new Promise(resolve => { finishA = resolve; });
+    }
+    return { ok: true, json: async () => ({ skills: [{ name: "probe", disableModelInvocation: true }] }) };
+  };
+  const props = { cwd: "/workspace", onSend() {}, isStreaming: false, slashCommands: [{ name: "probe", source: "skill", description: "Probe skill" }] };
+  try {
+    const ui = render(React.createElement(ChatInput, { ...props, sessionId: "profile-a" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/probe" } });
+    await waitFor(() => assert.equal(typeof finishA, "function"));
+    ui.rerender(React.createElement(ChatInput, { ...props, sessionId: "profile-b" }));
+    await waitFor(() => assert.match(screen.getByRole("option", { name: /probe/ }).textContent, /dormant/i));
+    assert.deepEqual(requests.map(url => url.searchParams.get("sessionId")), ["profile-a", "profile-b"]);
+    await act(async () => { finishA({ ok: true, json: async () => ({ skills: [] }) }); });
+    assert.match(screen.getByRole("option", { name: /probe/ }).textContent, /dormant/i);
+    globalThis.fetch = async (input) => {
+      requests.push(new URL(String(input), "http://localhost"));
+      return { ok: false, json: async () => ({}) };
+    };
+    ui.rerender(React.createElement(ChatInput, props));
+    await waitFor(() => assert.doesNotMatch(screen.getByRole("option", { name: /probe/ }).textContent, /dormant/i));
+    assert.equal(requests.at(-1).searchParams.has("sessionId"), false);
+    assert.equal(requests.at(-1).searchParams.get("cwd"), "/workspace");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousScroll) window.HTMLElement.prototype.scrollIntoView = previousScroll;
+    else delete window.HTMLElement.prototype.scrollIntoView;
+  }
+});
+
 test("no-key composer text survives minimization and warns on document exit until sent", async () => {
   const user = userEvent.setup();
   const sent = [];

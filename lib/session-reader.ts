@@ -103,16 +103,19 @@ async function loadAllSessions(root: SessionRoot): Promise<SessionInfo[]> {
 
 export async function listAllSessions(root: SessionRoot = sessionRoot()): Promise<SessionInfo[]> {
   const generation = globalThis.__piSessionListGeneration ?? 0;
+  // Physical scans are shared below this layer; these results already contain
+  // root-qualified ids and must retain the complete selected locator identity.
+  const cacheKey = JSON.stringify([root.token, root.agentDir, root.profile, root.sessionsDir, root.blobsDir]);
 
   // Return cached result if still fresh (avoids re-scanning session files
   // and re-spawning git processes on every page load).
-  if (globalThis.__piSessionListCache?.root === root.sessionsDir && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
+  if (globalThis.__piSessionListCache?.root === cacheKey && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
     return globalThis.__piSessionListCache.data;
   }
 
   // Coalescing dedup: concurrent callers share the same in-flight promise
   // only while it belongs to the current cache generation.
-  if (globalThis.__piSessionListPromise && globalThis.__piSessionListPromiseRoot === root.sessionsDir && globalThis.__piSessionListPromiseGeneration === generation) {
+  if (globalThis.__piSessionListPromise && globalThis.__piSessionListPromiseRoot === cacheKey && globalThis.__piSessionListPromiseGeneration === generation) {
     return globalThis.__piSessionListPromise;
   }
 
@@ -123,7 +126,7 @@ export async function listAllSessions(root: SessionRoot = sessionRoot()): Promis
     // An invalidation may happen while the scan is in flight. Do not let that
     // older result repopulate the cache after a session mutation.
     if ((globalThis.__piSessionListGeneration ?? 0) === generation && !retired) {
-      globalThis.__piSessionListCache = { data, ts: Date.now(), root: root.sessionsDir };
+      globalThis.__piSessionListCache = { data, ts: Date.now(), root: cacheKey };
     }
     return data;
   });
@@ -149,7 +152,7 @@ export async function listAllSessions(root: SessionRoot = sessionRoot()): Promis
 
   globalThis.__piSessionListPromise = trackedPromise;
   globalThis.__piSessionListPromiseGeneration = generation;
-  globalThis.__piSessionListPromiseRoot = root.sessionsDir;
+  globalThis.__piSessionListPromiseRoot = cacheKey;
   return trackedPromise;
 }
 

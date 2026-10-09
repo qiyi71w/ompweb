@@ -141,15 +141,20 @@ export function AppShell({ appName }: { appName: string }) {
   useEffect(() => {
     let active = true;
     let generation = 0;
+    setHideThinkingBlock(false);
     const load = () => {
       const requestGeneration = ++generation;
       fetch(nativeSettingsContextUrl, { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
         .then((data: NativeSettingsView | null) => {
-          const field = data?.fields.hideThinkingBlock.effective;
-          if (active && generation === requestGeneration && field?.known && typeof field.value === "boolean") setHideThinkingBlock(field.value);
+          if (!active || generation !== requestGeneration) return;
+          const field = data?.fields.hideThinkingBlock;
+          const value = field?.effective.known && typeof field.effective.value === "boolean"
+            ? field.effective.value
+            : field?.native.known && typeof field.native.value === "boolean" ? field.native.value : false;
+          setHideThinkingBlock(value);
         })
-        .catch(() => {});
+        .catch(() => { if (active && generation === requestGeneration) setHideThinkingBlock(false); });
     };
     load();
     window.addEventListener("focus", load);

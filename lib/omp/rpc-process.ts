@@ -65,8 +65,6 @@ export interface RpcProcessOptions {
   environment?: NodeJS.ProcessEnv;
   /** Extra CLI args appended after the base `--mode rpc-ui --cwd <cwd>`. */
   extraArgs?: string[];
-  /** Environment overrides merged over process.env. */
-  env?: Record<string, string>;
   /** Called for every non-response frame (events, extension UI, subagent frames). */
   onFrame?: (frame: RpcFrame) => void;
   /** Called once when the child exits, after pending commands are rejected. */
@@ -107,7 +105,7 @@ export class RpcProcess {
     if (options.onFrame) this.frameListeners.add(options.onFrame);
 
     const args = ["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])];
-    const childEnv = sanitizeProjectCommandEnvironment(options.environment ?? { ...process.env, ...options.env });
+    const childEnv = sanitizeProjectCommandEnvironment(options.environment ?? process.env);
     const target = wrapWindowsScript(bin, args);
     this.child = this.spawnProcess(target.file, target.args, {
       cwd: options.cwd,

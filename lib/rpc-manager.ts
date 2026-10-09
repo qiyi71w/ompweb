@@ -1379,7 +1379,7 @@ export class AgentSessionWrapper {
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
-      const context = await resolveConfigurationContext({ cwd: this.cwd, sessionId: this.sessionId });
+      const context = await resolveConfigurationContext({ cwd: this.cwd, sessionId: this.sessionId }, { refreshAgentEnv: true });
       context.launchArgs = buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, context.launchArgs);
       context.processIdentity = createHash("sha256").update(context.processIdentity).update(JSON.stringify(context.launchArgs)).digest("hex");
       const proc = new RpcProcess({
