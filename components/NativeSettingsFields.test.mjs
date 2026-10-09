@@ -118,6 +118,10 @@ test("save and native invalidation preserve select identity and focus while busy
   assert.equal(screen.getByRole("combobox"), select);
   assert.equal(document.activeElement, select);
   assert.equal(select.value, "write");
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: { ...controller(saved, calls), error: "save-failed" }, keys: [entry.key] }));
+  assert.equal(document.activeElement, select);
+  fireEvent.change(select, { target: { value: "always-ask" } });
+  assert.deepEqual(calls.at(-1), ["set", entry.key, "always-ask"]);
 });
 
 test("unrelated native refresh preserves dirty drafts and scope changes reinitialize", () => {
@@ -131,6 +135,10 @@ test("unrelated native refresh preserves dirty drafts and scope changes reinitia
   screen.rerender(React.createElement(NativeSettingsFields, { controller: refreshed, keys: [entry.key] }));
   assert.equal(input.value, "21");
   screen.rerender(React.createElement(NativeSettingsFields, { controller: { ...refreshed, scope: "project" }, keys: [entry.key] }));
+  assert.equal(screen.getByRole("spinbutton").value, "10");
+  fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "42" } });
+  const otherContext = { ...refreshed, scope: "project", view: { ...refreshed.view, context: { id: "other-workspace" } } };
+  screen.rerender(React.createElement(NativeSettingsFields, { controller: otherContext, keys: [entry.key] }));
   assert.equal(screen.getByRole("spinbutton").value, "10");
 });
 
