@@ -75,13 +75,13 @@ function FieldEditor({ controller, field }: { controller: NativeSettingsControll
       [next[index], next[index + delta]] = [next[index + delta], next[index]];
       persist(next);
     };
-    editor = <fieldset aria-disabled={disabled} aria-label={label} onClickCapture={(event) => { if (disabled) event.preventDefault(); }} style={{ border: 0, padding: 0, margin: 0 }}>
+    editor = <fieldset className="settings-card-block compaction-method-order" aria-disabled={disabled} aria-label={label} onClickCapture={(event) => { if (disabled) event.preventDefault(); }} style={{ border: 0, padding: 0, margin: 0 }}>
       {methods.map((method) => {
         const index = order.indexOf(method);
         const name = t(`settingsConfig.compactionMethod.${method}`);
-        return <div key={method} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-          <span aria-hidden="true">{index >= 0 ? index + 1 : "—"}</span>
-          <label style={{ flex: 1 }}><input type="checkbox" checked={index >= 0} aria-label={index >= 0 ? t("settingsConfig.compactionMethodPosition", { method: name, position: index + 1 }) : name} aria-describedby={`${descriptionId}-${method}`} aria-disabled={disabled} onChange={(event) => persist(event.target.checked ? [...order, method] : order.filter((item) => item !== method))} /> {name}<span id={`${descriptionId}-${method}`} style={{ display: "block", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{t(`settingsConfig.compactionMethod.${method}Desc`)}</span></label>
+        return <div key={method} className="compaction-method-row" data-selected={index >= 0}>
+          <span className="compaction-method-position" aria-hidden="true">{index >= 0 ? index + 1 : "—"}</span>
+          <label><input type="checkbox" checked={index >= 0} aria-label={index >= 0 ? t("settingsConfig.compactionMethodPosition", { method: name, position: index + 1 }) : name} aria-describedby={`${descriptionId}-${method}`} aria-disabled={disabled} onChange={(event) => persist(event.target.checked ? [...order, method] : order.filter((item) => item !== method))} /><span>{name}<span id={`${descriptionId}-${method}`} style={{ display: "block", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{t(`settingsConfig.compactionMethod.${method}Desc`)}</span></span></label>
           <button type="button" className="settings-back ui-focus-ring" aria-disabled={disabled || index <= 0} aria-label={t("settingsConfig.moveCompactionMethodUp", { method: name })} onClick={() => { if (index > 0) move(index, -1); }}><ArrowUp size={14} /></button>
           <button type="button" className="settings-back ui-focus-ring" aria-disabled={disabled || index < 0 || index >= order.length - 1} aria-label={t("settingsConfig.moveCompactionMethodDown", { method: name })} onClick={() => { if (index >= 0 && index < order.length - 1) move(index, 1); }}><ArrowDown size={14} /></button>
         </div>;
@@ -116,8 +116,8 @@ function FieldEditor({ controller, field }: { controller: NativeSettingsControll
     </form>;
   }
   return <div className="settings-card" data-search-id={descriptor.searchId ?? field.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 12, marginBottom: 10 }} data-native-field={field.key}>
-    <div className="settings-card-text" style={{ flex: "1 1 240px" }}><div className="settings-card-title">{label}</div>{description !== descriptionKey && <p style={{ margin: "4px 0", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{description}</p>}<code style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)" }}>{field.key}</code><NativeSettingState controller={controller} field={field} /></div>
-    <div className="settings-card-control">{editor}</div>
+    <div className="settings-card-text" style={{ flex: field.key === "compaction.methodOrder" ? "none" : "1 1 240px" }}><div className="settings-card-title">{label}</div>{description !== descriptionKey && <p style={{ margin: "4px 0", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{description}</p>}<code style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)" }}>{field.key}</code><NativeSettingState controller={controller} field={field} /></div>
+    <div className="settings-card-control" style={field.key === "compaction.methodOrder" ? { width: "100%" } : undefined}>{editor}</div>
   </div>;
 }
 
