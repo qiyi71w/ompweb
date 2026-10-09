@@ -471,6 +471,8 @@ during the wait.
   replacement text, pending mutations and visible 409 conflicts retain their original
   baselines until explicit refresh or selection; a successful save reloads its result.
   Context changes fence old reads and mutation settlements, including their busy state.
+  Settings keeps an existing native view's tab mounted while refreshing; the loading
+  skeleton is reserved for a context with no view yet.
 - The Agents enable checkbox edits `task.disabledAgents` in the selected layer's saved
   list (absent means empty). Native effective enablement is displayed separately because
   a workspace or launch override can still win over a global edit.

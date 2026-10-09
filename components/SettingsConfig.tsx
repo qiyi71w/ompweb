@@ -907,7 +907,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             <SettingsTabs active={currentTab} onSelect={handleSelectTab} workspaceReady={workspaceReady} layout={isMobile ? "horizontal" : "vertical"} attentionTabs={attentionTabs} />
 
             <div className="settings-content" style={contentStyle}>
-            {nativeSettingsRequired && nativeSettingsLoading ? (
+            {nativeSettingsRequired && nativeSettingsLoading && !native.view ? (
               <div className="settings-loading-state" role="status" aria-live="polite" aria-busy="true" aria-label={t("appShell.loading")}>
                 <div className="skeleton settings-loading-row" />
                 <div className="skeleton settings-loading-row" />
