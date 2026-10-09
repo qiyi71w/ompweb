@@ -100,6 +100,9 @@ individual field/entity intentions and the original baselines, retaining
 unrelated external additions, unknown fields and YAML comments. Renames and
 ordering retain model comment identity. A conflict requires refreshing and
 reviewing the changed file; the editor never silently replays the draft.
+Editing thinking levels keeps known efforts in their canonical order, including
+after disabling and re-enabling a level. Future effort names keep their relative
+order, and unrelated custom wire mappings and native options are preserved.
 Stored credentials are not returned to the browser. Leave them untouched or
 choose **Preserve stored credential**, enter a replacement, or explicitly
 choose **Clear stored credential**. The model **Test** action only validates

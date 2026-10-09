@@ -348,7 +348,11 @@ function ThinkingEditor({
       if (entry === "omit") delete map[level];
       else map[level] = entry;
     }
-    const ordered = [...included];
+    const ordered: string[] = [];
+    for (const known of THINKING_LEVELS) {
+      if (included.delete(known)) ordered.push(known);
+    }
+    ordered.push(...included);
     onChange({
       ...(value ?? {}),
       mode: value?.mode ?? "effort",

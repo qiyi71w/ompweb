@@ -256,20 +256,8 @@ function mergeNode(doc: Document, node: unknown, value: unknown): unknown {
   return created;
 }
 
-/** Serialize a config. When `existingSource` is a parseable document the edit
- * is applied onto it so hand-written comments and formatting survive. */
-export function serializeModelsConfig(config: ModelsFileConfig, existingSource?: string): string {
-  if (existingSource === undefined || existingSource.trim() === "") return stringify(config);
-  const doc = parseDocument(existingSource);
-  if (doc.errors.length > 0) return stringify(config);
-  if (!isMap(doc.contents)) {
-    // Comment-only or non-mapping document: replacing contents still keeps the
-    // file's leading comments (they hang off the document, not the node).
-    doc.contents = doc.createNode(config) as unknown as typeof doc.contents;
-    return doc.toString();
-  }
-  mergeNode(doc, doc.contents, config);
-  return doc.toString();
+export function serializeModelsConfig(config: ModelsFileConfig): string {
+  return stringify(config);
 }
 
 function modelsPath(context: OmpConfigurationContext): string {
