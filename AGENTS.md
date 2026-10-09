@@ -466,6 +466,15 @@ during the wait.
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
 
+### Agents and MCP editor drafts
+- Native-settings invalidation refreshes clean editors only. Dirty drafts, credential
+  replacement text, pending mutations and visible 409 conflicts retain their original
+  baselines until explicit refresh or selection; a successful save reloads its result.
+  Context changes fence old reads and mutation settlements, including their busy state.
+- The Agents enable checkbox edits `task.disabledAgents` in the selected layer's saved
+  list (absent means empty). Native effective enablement is displayed separately because
+  a workspace or launch override can still win over a global edit.
+
 ### MCP configuration (`lib/omp/mcp-config.ts`, `/api/mcp`, `components/McpConfig.tsx`)
 - Project MCP config resolution order: `.omp/mcp.json`, `.omp/.mcp.json`,
   `mcp.json`, `.mcp.json` at the git top level (falls back to cwd for
